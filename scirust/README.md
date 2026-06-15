@@ -25,9 +25,11 @@ hors-ligne (PRNG déterministe maison, pas de `rand`/`criterion`).
 
 ## Statut (voir §5.1 et §7 du paper)
 
-API sûre (pas de `read_volatile`), sémantique exacte, avec un **chemin AVX2**
-(dispatch à l'exécution + repli scalaire portable, équivalence testée, ~×13 vs
-scalaire sur le banc partagé). **NEON** (ARM) et **AVX-512** restent à écrire.
+API sûre (pas de `read_volatile`), sémantique exacte, avec des **chemins SIMD
+AVX2 (x86_64) et NEON (aarch64)** dispatché à l'exécution + repli scalaire
+portable, chacun avec un test d'équivalence ≡ scalaire. AVX2 ~×13 vs scalaire ;
+NEON **vérifié par cross-compilation** (non chronométré, pas d'ARM sur le banc).
+**AVX-512** reste à écrire.
 
 Le prototype de mesure utilise des projections **aléatoires** (non apprises) :
 il valide la machinerie *quantification INT4 + résidu 1-bit + ranking*, **pas**

@@ -125,7 +125,16 @@ impl SciRustSlhaTile {
                 return unsafe { self.compute_score_avx2(q_coarse, q_sign) };
             }
         }
-        self.compute_score_scalar(q_coarse, q_sign)
+        #[cfg(target_arch = "aarch64")]
+        {
+            // NEON is baseline on aarch64 — no runtime detection needed.
+            // SAFETY: NEON is always available on this target.
+            return unsafe { self.compute_score_neon(q_coarse, q_sign) };
+        }
+        #[allow(unreachable_code)] // unreachable on aarch64 (returns above)
+        {
+            self.compute_score_scalar(q_coarse, q_sign)
+        }
     }
 
     /// Binary 1-bit correction: λ · (d_s − 2·popcount(q_sign ^ B)).
@@ -207,6 +216,66 @@ impl SciRustSlhaTile {
         _mm256_storeu_ps(tmp.as_mut_ptr(), acc);
         let coarse: f32 = tmp.iter().sum();
 
+        if self.is_warm() {
+            return coarse;
+        }
+        coarse + self.residual_term(q_sign)
+    }
+
+    /// NEON path (aarch64): vectorised INT4 dequant + dot for the coarse term.
+    /// NEON is baseline on aarch64, so the dispatcher calls this unconditionally.
+    ///
+    /// Note: compile-checked via cross-compilation to `aarch64-unknown-linux-gnu`;
+    /// runtime equivalence is asserted by `neon_path_matches_scalar` on ARM.
+    ///
+    /// # Safety
+    /// Uses `std::arch::aarch64` NEON intrinsics; sound on any aarch64 CPU.
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    unsafe fn compute_score_neon(
+        &self,
+        q_coarse: &[f32; D_C],
+        q_sign: &[u64; RESIDUAL_WORDS],
+    ) -> f32 {
+        use std::arch::aarch64::*;
+
+        let global = self.scale;
+        let inv255 = 1.0f32 / 255.0;
+        let eight = vdupq_n_f32(8.0);
+        let mask = vdup_n_u8(0x0F);
+        let mut acc = vdupq_n_f32(0.0);
+        let latent = self.latent_kv.as_ptr();
+        let q = q_coarse.as_ptr();
+
+        // Dequant `(n - 8) * group_scale` for a 4-lane chunk, then FMA with q.
+        macro_rules! quad {
+            ($n4:expr, $off:expr, $gs:expr) => {{
+                let v = vmulq_f32(vsubq_f32($n4, eight), $gs);
+                acc = vfmaq_f32(acc, v, vld1q_f32(q.add($off)));
+            }};
+        }
+
+        // 8 groups × 8 bytes = 8 × 16 dims = 128 dims; one scale per group.
+        for g in 0..N_GROUPS {
+            let base = g * GROUP_DIM;
+            let gs = vdupq_n_f32(global * (self.group_scales[g] as f32 * inv255));
+            let packed = vld1_u8(latent.add(g * 8)); // 8 bytes
+            let lo = vand_u8(packed, mask);
+            let hi = vshr_n_u8::<4>(packed);
+            // Interleave so nibbles come out in dimension order.
+            let d_lo = vzip1_u8(lo, hi); // dims base..base+7
+            let d_hi = vzip2_u8(lo, hi); // dims base+8..base+15
+
+            let w_lo = vmovl_u8(d_lo); // u16×8
+            quad!(vcvtq_f32_u32(vmovl_u16(vget_low_u16(w_lo))), base, gs);
+            quad!(vcvtq_f32_u32(vmovl_u16(vget_high_u16(w_lo))), base + 4, gs);
+
+            let w_hi = vmovl_u8(d_hi);
+            quad!(vcvtq_f32_u32(vmovl_u16(vget_low_u16(w_hi))), base + 8, gs);
+            quad!(vcvtq_f32_u32(vmovl_u16(vget_high_u16(w_hi))), base + 12, gs);
+        }
+
+        let coarse = vaddvq_f32(acc);
         if self.is_warm() {
             return coarse;
         }
@@ -390,6 +459,25 @@ mod tests {
                     "tile {i}: scalar {s} vs avx2 {a}"
                 );
             }
+        }
+    }
+
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn neon_path_matches_scalar() {
+        use crate::scenario::{build_tile, generate, Projection};
+        let proj = Projection::new(9);
+        let (q, toks) = generate(123, 64, 0.4);
+        let q_sign = proj.sign_bits(&q);
+        for (i, t) in toks.iter().enumerate() {
+            // Alternate HOT / WARM to cover both branches.
+            let tile = build_tile(&proj, t, i as u32, i % 2 == 0);
+            let s = tile.compute_score_scalar(&q, &q_sign);
+            let a = unsafe { tile.compute_score_neon(&q, &q_sign) };
+            assert!(
+                (s - a).abs() <= 1e-3 * (1.0 + s.abs()),
+                "tile {i}: scalar {s} vs neon {a}"
+            );
         }
     }
 }

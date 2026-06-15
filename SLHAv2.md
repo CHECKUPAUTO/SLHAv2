@@ -247,7 +247,7 @@ Les limitations de la v1 sont **levées** dans le crate `scirust` (`cargo test` 
 
 **Avancées récentes & restant :**
 
-- ✅ **Chemin SIMD AVX2** implémenté : dispatch à l'exécution + repli scalaire portable + test d'équivalence scalaire ≡ AVX2. ~×13 vs scalaire (§7.4). Restent **NEON** (ARM) et **AVX-512**.
+- ✅ **Chemins SIMD : AVX2 + NEON.** AVX2 (x86_64, dispatch runtime, ~×13, §7.4) **et** NEON (aarch64, baseline), chacun avec un test d'équivalence ≡ scalaire. Le NEON est **vérifié par cross-compilation** (`aarch64-unknown-linux-gnu`) ; son équivalence à l'exécution (`neon_path_matches_scalar`) s'exécute sur matériel ARM. Reste **AVX-512**.
 - ◑ **Projection bas-rang apprise** : le §7.3 l'aborde par PCA (optimal linéaire) et révèle que le goulot de fidélité devient alors l'**INT4 du latent**. Reste l'apprentissage de bout en bout des projections conjointement au modèle.
 - ◑ **Quantification latente par groupe (MX)** implémentée : 8 micro-échelles `u8` logées dans les ex-octets `reserved` (scalaire + AVX2, test). Elle réduit >2× l'erreur de reconstruction mais le gain end-to-end est marginal — le vrai plafond est la **résolution 4 bits** (§7.3). Pistes : **INT8 / NF4** latent, ou `d_s` plus grand.
 
@@ -333,7 +333,7 @@ Le kernel dispose désormais d'un **chemin AVX2** (dispatch à l'exécution via 
 | Scalaire (référence) | ~3,0 M scores/s | 1× |
 | AVX2 (dispatch) | ~39,5 M scores/s | **×13** |
 
-Le facteur dépasse les 8× théoriques du SIMD `f32` car le chemin scalaire payait aussi une déquantification INT4 *branchy* que l'AVX2 fusionne. À traiter comme un ordre de grandeur sur banc partagé (pas un chiffre final) ; **NEON** (ARM) et **AVX-512** restent à écrire.
+Le facteur dépasse les 8× théoriques du SIMD `f32` car le chemin scalaire payait aussi une déquantification INT4 *branchy* que l'AVX2 fusionne. À traiter comme un ordre de grandeur sur banc partagé. Un **chemin NEON** (aarch64) existe également, **vérifié par cross-compilation** mais non chronométré ici (pas de matériel ARM sur le banc) ; **AVX-512** reste à écrire.
 
 **Conclusion partielle.** Le mécanisme est **mathématiquement correct** (tests, dont l'équivalence scalaire/AVX2) et **directionnellement validé** : HOT ≥ WARM, Soft-Paging quasi sans perte à faible `rho`, accélération SIMD ×13. Deux bémols : (1) avec une base *apprise*, le goulot de fidélité devient l'**INT4 du latent**, pas le bas-rang ; (2) les gains du résidu 1-bit restent **modérés** à `d_s = 256`. Pistes : quantification latente plus fine (zero-point par groupe / NF4), `d_s` plus grand, projections apprises de bout en bout.
 
@@ -343,7 +343,7 @@ Le facteur dépasse les 8× théoriques du SIMD `f32` car le chemin scalaire pay
 
 SLHA v2 **propose** qu'en mariant la rigueur d'un système d'exploitation gérant sa mémoire au bit près (CCOS) avec des abstractions mathématiques appliquées aux limites physiques du silicium (SciRust), l'inférence locale puisse changer de paradigme : le cache KV cesserait d'être un fardeau monolithique pour devenir une structure fluide, résiliente et consciente de l'architecture qui l'héberge.
 
-**Cette spécification (v1) progresse vers la validation.** Le crate `scirust` est compilable et testé (§5.1), deux bancs reproductibles existent, un chemin **AVX2** (×13, §7.4) accélère le kernel, et les résultats (§7) confirment la correction du mécanisme et la viabilité du Soft-Paging. Le point dur révélé par la mesure : avec une base bas-rang *apprise*, le goulot de fidélité devient l'**INT4 du latent** — et le groupage MX (déjà en place) ne le lève pas, car le plafond est la résolution 4 bits (§7.3). Restent à faire : (1) une **résolution latente plus large** (INT8 / NF4) et l'extension SIMD à **NEON / AVX-512** ; (2) la validation **matérielle** du §6 (cache misses, perplexité sous Debian 13) ; (3) l'**apprentissage de bout en bout** des projections `W_down`/`W_up`.
+**Cette spécification (v1) progresse vers la validation.** Le crate `scirust` est compilable et testé (§5.1), deux bancs reproductibles existent, un chemin **AVX2** (×13, §7.4) accélère le kernel, et les résultats (§7) confirment la correction du mécanisme et la viabilité du Soft-Paging. Le point dur révélé par la mesure : avec une base bas-rang *apprise*, le goulot de fidélité devient l'**INT4 du latent** — et le groupage MX (déjà en place) ne le lève pas, car le plafond est la résolution 4 bits (§7.3). Restent à faire : (1) une **résolution latente plus large** (INT8 / NF4) et l'extension SIMD à **AVX-512** (AVX2 et NEON déjà en place) ; (2) la validation **matérielle** du §6 (cache misses, perplexité sous Debian 13) ; (3) l'**apprentissage de bout en bout** des projections `W_down`/`W_up`.
 
 ---
 
