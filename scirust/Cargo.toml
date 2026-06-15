@@ -1,0 +1,18 @@
+[package]
+name = "scirust"
+version = "0.2.0"
+edition = "2021"
+description = "SLHA v2 reference kernel: sub-low-rank latent + 1-bit residual hybrid attention, cache-line-aware tiling."
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "scirust"
+path = "src/lib.rs"
+
+# Zero external dependencies on purpose: the crate must build and test fully
+# offline, regardless of the environment network policy.
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

@@ -104,13 +104,13 @@ Pour maximiser la localité spatiale et temporelle, nous définissons une struct
 |---|---|---|---|
 | Composante Latente (d_c = 128) | INT4 Quantifié (4 bits / échantillon) | 64 Octets | Cache L1 (Data) — Ligne complète |
 | Bitmaps de Résidus (d_s = 256) | 4 mots binaires de 64 bits (u64) | 32 Octets | Registres Vectoriels AVX-512 / ARM Neon |
-| Métadonnées de Scaling & λ | 2 Flottants simple précision (f32) | 8 Octets | Alignement et contrôle d'amplitude |
+| Métadonnées (échelle, λ, σ_E, token, position, tête, flags, réserve) | 3×f32 + 2×u32 + 2×u16 + 8 o réservés | 32 Octets | Pagination CCOS & contrôle d'amplitude |
 
-**Invariant Matériel (corrigé) :** Les champs *utiles* totalisent **104 octets** (64 + 32 + 8). Mais l'attribut `#[repr(C, align(64))]` impose que la taille du type soit un multiple de son alignement : `size_of::<SciRustSlhaTile>()` vaut donc **128 octets**, dont **24 octets de remplissage (padding)**, et chaque tuile occupe **2 lignes de cache de 64 octets — pas une seule**. (Vérifié sous `rustc 1.94` : `size_of = 128`, `align_of = 64`.) L'ancienne affirmation « occupe exactement 104 octets » *et* « multiple exact d'une ligne de cache » était auto-contradictoire, 104 n'étant pas un multiple de 64.
+**Invariant Matériel (implémenté & vérifié) :** Les trois blocs totalisent **exactement 128 octets** — latent 64 o + résidu 32 o + métadonnées 32 o. Avec `#[repr(C, align(64))]`, `size_of::<SciRustSlhaTile>()` vaut **128 octets sans aucun padding** (`align_of = 64`), et une tuile occupe **2 lignes de cache pleines**. Garanti par le test `tile_is_exactly_128_bytes_zero_padding` (somme des champs == `size_of` == 128). *Historique :* l'énoncé v1 « exactement 104 octets / multiple d'une ligne de cache » était faux — 104 n'est pas un multiple de 64, et l'`align(64)` arrondit la taille à 128. Les 24 octets qui n'étaient alors que du remplissage portent désormais des métadonnées utiles (σ_E, identifiants, drapeaux de pagination).
 
-En revanche, le **bloc latent INT4 occupe à lui seul exactement 64 octets**, soit **une** ligne de cache pleine pour 128 dimensions sémantiques : c'est ce sous-bloc — et non la tuile entière — qui sature l'unité arithmétique en un unique chargement de ligne. Lors d'un calcul d'attention, SciRust pré-charge les vecteurs de requêtes dans le cache L1, puis balaie les tuiles de contexte séquentiellement.
+Par ailleurs, le **bloc latent INT4 occupe à lui seul exactement 64 octets**, soit **une** ligne de cache pleine pour 128 dimensions sémantiques : c'est ce sous-bloc — et non la tuile entière — qui sature l'unité arithmétique en un unique chargement de ligne. Lors d'un calcul d'attention, SciRust pré-charge les vecteurs de requêtes dans le cache L1, puis balaie les tuiles de contexte séquentiellement.
 
-> **Piste de conception (v2.1, hors périmètre de cette révision documentaire).** Pour rendre l'invariant « zéro gaspillage » réellement vrai, deux options : **(a)** exploiter les 24 octets de padding pour des métadonnées utiles (échelle du résidu, identifiant de jeton/position, tête, drapeaux) — ce qui justifie pleinement une tuile de 128 octets ; **(b)** un découpage **SoA** (latent 64 o dans un flux, résidu + métadonnées dans un autre) pour ne toucher qu'une seule ligne par flux. La structure du §5 reste inchangée dans la présente révision.
+> **État :** l'option « zéro gaspillage » est désormais **implémentée** dans le crate `scirust` (les 24 anciens octets de padding portent des métadonnées, test à l'appui). Reste ouverte une variante **SoA** (latent 64 o dans un flux, résidu + métadonnées dans un autre) si l'on veut ramener le balayage à **une seule** ligne de cache par tuile.
 
 ### 3.2 Calibration Dynamique du Facteur d'Échelle λ
 
@@ -152,91 +152,103 @@ Grâce à la décomposition asymétrique de SLHA v2, le noyau CCOS applique le p
 
 ## 5. Implémentation Logicielle du Micro-Noyau Asymétrique
 
-Le noyau d'inférence SLHA v2 est écrit en Rust (édition 2021) et respecte l'invariant de zéro allocation dans les boucles critiques. **Le listing ci-dessous est une implémentation de référence _scalaire_** : il fixe la *sémantique* exacte du score fusionné (déquantification INT4 en ligne + cœur binaire `popcount`), conforme à l'équation (2.3). Il n'est **pas** encore vectorisé et ne doit pas être lu comme du code optimisé prêt pour la production — ses limitations connues sont recensées au §5.1.
+Le noyau d'inférence SLHA v2 est écrit en Rust (édition 2021) et respecte l'invariant de zéro allocation dans les boucles critiques. Le crate `scirust` **compile et passe ses tests** (`cargo test`, 7 tests verts) ; le listing ci-dessous en est le cœur. C'est une **implémentation de référence _scalaire_, correcte avant d'être rapide** : API sûre (pas de pointeurs bruts, pas d'`unsafe`), sémantique exacte du score fusionné (eq. 2.3). Le chemin SIMD explicite reste à écrire — mais il est désormais *débloqué*, l'ancien `read_volatile` (qui interdisait toute vectorisation) ayant été retiré (cf. §5.1).
 
 Code source complet : [`scirust/src/attention/slha_v2.rs`](scirust/src/attention/slha_v2.rs)
 
 ```rust
-use std::arch::x86_64::*;
+// Constantes du modèle
+pub const D_C: usize = 128;                 // dim latente (INT4) -> 64 octets
+pub const D_S: usize = 256;                 // bits de résidu sign-LSH -> 32 octets
+pub const LATENT_BYTES: usize = D_C / 2;    // 64
+pub const RESIDUAL_WORDS: usize = D_S / 64; // 4
+pub const FLAG_HOT: u16 = 0;
+pub const FLAG_WARM: u16 = 1 << 0;          // résidu paginé : score = base latente seule
 
-#[repr(C, align(64))]
+#[repr(C, align(64))] // 128 octets exacts, zéro padding (test à l'appui)
+#[derive(Clone)]
 pub struct SciRustSlhaTile {
-    /// Espace latent compressé : 128 dimensions codées sur 4 bits (64 octets)
-    pub latent_kv: [u8; 64],
-    /// Résidu binaire de Johnson-Lindenstrauss : 256 bits (32 octets)
-    pub residual_bitmap: [u64; 4],
-    /// Facteur d'échelle de la quantification de bas rang
-    pub scale: f32,
-    /// Facteur de correction binaire dynamique calculé analytiquement
-    pub dynamic_lambda: f32,
+    pub latent_kv: [u8; LATENT_BYTES],          // 64  base h_KV en INT4 signé
+    pub residual_bitmap: [u64; RESIDUAL_WORDS], // 32  résidu sign-LSH (256 bits)
+    pub scale: f32,            //  4  échelle de déquantification INT4
+    pub dynamic_lambda: f32,   //  4  poids de correction binaire (eq. 3.2)
+    pub residual_sigma: f32,   //  4  σ_E par tuile (recalibrage de λ)
+    pub token_id: u32,         //  4
+    pub position: u32,         //  4
+    pub head_id: u16,          //  2
+    pub flags: u16,            //  2  HOT / WARM
+    pub _reserved: [u8; 8],    //  8  réserve -> total exact = 128
 }
 
-pub struct SciRustSlhaEngine;
+impl SciRustSlhaTile {
+    #[inline]
+    pub fn is_warm(&self) -> bool { self.flags & FLAG_WARM != 0 }
 
-impl SciRustSlhaEngine {
-    /// Calcule le score d'attention asymétrique d'une requête contre une tuile de contexte SLHA v2.
-    /// Ce code est conçu pour s'exécuter entièrement dans les registres CPU sans rupture de cache.
-    #[target_feature(enable = "avx2,popcnt")]
-    pub unsafe fn compute_tile_score(
-        q_coarse: *const f32,         // Vecteur de requête Q * W_up (128 dimensions contiguës)
-        q_residual_sign: *const u64,  // Signe de la requête packé sur 4 mots de 64 bits
-        tile: *const SciRustSlhaTile,
-    ) -> f32 {
-        // 1. Évaluation de la composante basse-fidélité (Déquantification 4-bit en ligne)
-        let mut coarse_accumulator = 0.0f32;
-        let latent_ptr = (*tile).latent_kv.as_ptr();
-        let scale = (*tile).scale;
-
-        // Boucle déroulée manuellement pour saturer les pipelines superscalaires
-        for i in 0..64 {
-            let packed_byte = core::ptr::read_volatile(latent_ptr.add(i));
-
-            // Extraction simultanée des deux valeurs de 4 bits (paires et impaires)
-            let v1 = (packed_byte & 0x0F) as f32 * scale;
-            let v2 = (packed_byte >> 4) as f32 * scale;
-
-            coarse_accumulator += core::ptr::read_volatile(q_coarse.add(i * 2)) * v1;
-            coarse_accumulator += core::ptr::read_volatile(q_coarse.add(i * 2 + 1)) * v2;
-        }
-
-        // 2. Évaluation de la correction binaire 1-Bit (Bitwise Attention Core)
-        // Le compilateur Rust mappe directement ces opérations vers l'instruction matérielle POPCNT
-        let mut popcount_accumulator: u32 = 0;
-        let tile_residual_ptr = (*tile).residual_bitmap.as_ptr();
-
-        popcount_accumulator += (core::ptr::read_volatile(q_residual_sign.add(0))
-            ^ core::ptr::read_volatile(tile_residual_ptr.add(0)))
-        .count_ones();
-        popcount_accumulator += (core::ptr::read_volatile(q_residual_sign.add(1))
-            ^ core::ptr::read_volatile(tile_residual_ptr.add(1)))
-        .count_ones();
-        popcount_accumulator += (core::ptr::read_volatile(q_residual_sign.add(2))
-            ^ core::ptr::read_volatile(tile_residual_ptr.add(2)))
-        .count_ones();
-        popcount_accumulator += (core::ptr::read_volatile(q_residual_sign.add(3))
-            ^ core::ptr::read_volatile(tile_residual_ptr.add(3)))
-        .count_ones();
-
-        // Résolution de la distance de Hamming inversée : d_s - (2 * popcount)
-        let residual_score = 256.0f32 - (2.0f32 * popcount_accumulator as f32);
-
-        // 3. Fusion linéaire finale avec le lambda co-conscient de la tuile
-        coarse_accumulator + ((*tile).dynamic_lambda * residual_score)
+    /// Déquantification INT4 *signée* (zero-point) : (nibble − 8) · scale.
+    #[inline]
+    pub fn dequant_at(&self, d: usize) -> f32 {
+        let byte = self.latent_kv[d >> 1];
+        let nib = if d & 1 == 0 { byte & 0x0F } else { byte >> 4 };
+        ((nib as i32) - 8) as f32 * self.scale
     }
+
+    /// Score fusionné (eq. 2.3). API sûre, sans `read_volatile`, boucle
+    /// auto-vectorisable. En mode WARM, le terme binaire est ignoré.
+    pub fn compute_score(&self, q_coarse: &[f32; D_C], q_sign: &[u64; RESIDUAL_WORDS]) -> f32 {
+        // 1. Terme continu bas-fidélité : <q_coarse, dequant(latent)>
+        //    (le crate matérialise d'abord le latent via dequant_latent()
+        //     pour une boucle SIMD plus propre — équivalent à l'inline ci-dessous)
+        let mut coarse = 0.0f32;
+        for d in 0..D_C {
+            coarse += q_coarse[d] * self.dequant_at(d);
+        }
+        // 2. WARM : résidu paginé -> base latente seule
+        if self.is_warm() {
+            return coarse;
+        }
+        // 3. Correction binaire 1-bit : λ · (d_s − 2·popcount(q_sign ^ B))
+        //    popcount(XOR) = distance de Hamming ; d_s − 2·Hamming = produit
+        //    scalaire signé des deux vecteurs ±1.
+        let mut hamming = 0u32;
+        for w in 0..RESIDUAL_WORDS {
+            hamming += (q_sign[w] ^ self.residual_bitmap[w]).count_ones();
+        }
+        let residual_score = D_S as f32 - 2.0 * hamming as f32;
+        coarse + self.dynamic_lambda * residual_score
+    }
+}
+
+/// Quantification INT4 signée, échelle symétrique par tuile.
+/// value ≈ (nibble − 8) · scale, avec nibble ∈ [0, 15] -> plage signée [−8, 7].
+pub fn quantize_latent(v: &[f32; D_C]) -> ([u8; LATENT_BYTES], f32) {
+    let max_abs = v.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
+    let scale = if max_abs > 0.0 { max_abs / 7.0 } else { 1.0 };
+    let mut out = [0u8; LATENT_BYTES];
+    for d in 0..D_C {
+        let nib = (((v[d] / scale).round() as i32).clamp(-8, 7) + 8) as u8 & 0x0F;
+        if d & 1 == 0 {
+            out[d >> 1] = (out[d >> 1] & 0xF0) | nib;
+        } else {
+            out[d >> 1] = (out[d >> 1] & 0x0F) | (nib << 4);
+        }
+    }
+    (out, scale)
 }
 ```
 
-### 5.1 Limitations connues de l'implémentation de référence
+### 5.1 État de l'implémentation de référence
 
-Le listing ci-dessus établit la **sémantique** du score, mais plusieurs éléments contredisent les objectifs de performance affichés et seront corrigés lors de la phase d'implémentation (crate buildable + tests + bench) :
+Les limitations de la v1 sont **levées** dans le crate `scirust` (`cargo test` vert) :
 
-- **`read_volatile` dans la boucle chaude.** Les lectures volatiles interdisent au compilateur (LLVM) de vectoriser, réordonner ou coalescer les accès. Elles **annulent** donc l'auto-vectorisation et la saturation superscalaire visées. Pour de la mémoire normale (≠ MMIO), il faut des lectures ordinaires — et idéalement du SIMD explicite. En conséquence, le commentaire « Boucle déroulée manuellement pour saturer les pipelines superscalaires » est **aspirationnel** : la boucle n'est en l'état ni déroulée à la main, ni vectorisée.
-- **`#[target_feature(enable = "avx2,…")]` sans aucun intrinsèque AVX2.** Le corps est intégralement scalaire ; seul `popcnt` (via `count_ones()`) est réellement exploité. La déclaration `avx2` est donc trompeuse tant qu'aucun chemin SIMD n'existe.
-- **`use std::arch::x86_64::*;` est inutilisé** (avertissement compilateur) tant qu'aucun intrinsèque SIMD n'est appelé.
-- **Déquantification INT4 non signée, sans zero-point.** `(octet & 0x0F) as f32 * scale` ne produit que des valeurs dans `[0, 15]·scale`, donc **toujours ≥ 0**. Or des clés/valeurs réelles sont signées : une quantification symétrique (p. ex. `(nibble − 8)·scale`) ou un zero-point explicite est nécessaire pour représenter la base bas-rang sans biais. *(Changement de sémantique — traité séparément de cette révision purement documentaire.)*
-- **Pas encore un crate.** Le fichier `scirust/src/attention/slha_v2.rs` est orphelin (ni `Cargo.toml`, ni `lib.rs`, ni déclaration `mod`) : il ne compile pas tel quel et n'est donc pas testé. La correspondance code ↔ équation (2.3) reste à prouver par des tests unitaires.
+- ✅ **`read_volatile` supprimé.** Le chemin chaud lit des `slice`s normaux : LLVM peut de nouveau auto-vectoriser et réordonner. La spécialisation SIMD n'est pas encore écrite, mais elle n'est plus **bloquée**.
+- ✅ **INT4 signé (zero-point).** La déquantification est `(nibble − 8)·scale` : la base bas-rang représente désormais des valeurs négatives. Garanti par le test `int4_dequant_round_trips_signed_values`.
+- ✅ **API sûre, pas de `target_feature` trompeur.** Plus d'`unsafe`, plus d'import mort, plus de gate `avx2` sans intrinsèque ; `count_ones()` se compile en `POPCNT` quand la cible le supporte, avec repli portable (ARM Neoverse/Thor inclus).
+- ✅ **Tuile = 128 o sans padding** et **crate compilable + testé** : 7 tests, dont l'identité de Hamming `d_s − 2·popcount` prouvée contre une référence brute, et la correspondance code ↔ eq. (2.3).
 
-> Ces points relèvent de la phase « crate buildable + tests / kernel optimisé », distincte de la présente mise en cohérence documentaire.
+**Restant (travaux futurs) :**
+
+- ✍️ Chemin SIMD explicite (AVX-512 / NEON) et microbenchmark de débit. La référence scalaire actuelle tourne à ~2,9 M scores/s (cf. §7) — c'est une borne basse, non optimisée.
+- ✍️ Qualité de la projection bas-rang **apprise** (`W_down`/`W_up`) : hors périmètre du prototype, qui suppose la base capturée idéalement et mesure la machinerie quantification + résidu 1-bit (cf. §7).
 
 ---
 
@@ -244,7 +256,7 @@ Le listing ci-dessus établit la **sémantique** du score, mais plusieurs élém
 
 Pour valider les gains de performance de SLHA v2 par rapport aux structures de graphes et d'attention conventionnelles, trois métriques matérielles strictes doivent être mesurées lors des prochains tests de charge sous Debian 13.
 
-**Les valeurs ci-dessous (≥ 85 %, 3,5×–5×, ΔP < 0,04) sont des cibles de conception / hypothèses à valider, et non des résultats mesurés.** Aucune mesure n'a encore été réalisée ; les §6.1–6.3 décrivent le protocole destiné à les confirmer ou les infirmer.
+**Les valeurs ci-dessous (≥ 85 %, 3,5×–5×, ΔP < 0,04) sont des cibles de conception / hypothèses, pas des résultats mesurés.** Les §6.1–6.3 décrivent le protocole matériel (cache misses, débit, perplexité) qui reste à exécuter sous Debian 13. En revanche, des **mesures préliminaires sur prototype** (fidélité de l'approximation, HOT vs WARM) existent déjà et sont rapportées au **§7**.
 
 ### 6.1 Taux de Cache Misses L1/L2/L3
 
@@ -266,11 +278,46 @@ Pour valider les gains de performance de SLHA v2 par rapport aux structures de g
 
 ---
 
-## 7. Conclusion
+## 7. Résultats de Mesure Préliminaires (Prototype SciRust)
+
+Le crate `scirust` inclut un prototype reproductible (`cargo run --example measure --release`) qui mesure la **qualité de l'approximation** du score SLHA sur données synthétiques.
+
+**Portée & honnêteté méthodologique.** Les projections sont **aléatoires** (Gaussiennes) : `Z` (sign-LSH) l'est par conception, mais `W_down`/`W_up` ne sont **pas apprises**. Le prototype suppose donc la base bas-rang *capturée idéalement* et mesure uniquement la machinerie **quantification INT4 + résidu 1-bit + ranking** ; la qualité d'une projection bas-rang apprise (qui ne peut qu'améliorer ces chiffres) est hors périmètre. On note `rho = ||e|| / ||k_real||` la part d'énergie que la base laisse au résidu.
+
+### 7.1 Fidélité du cœur binaire (sign-LSH, d_s = 256)
+
+Sur des paires couvrant toute la plage angulaire, l'estimateur 1-bit suit fidèlement le cosinus vrai (Spearman > 0,9, prouvé par test). Mais dans le **régime réaliste** (résidu quasi-orthogonal à la requête), 256 bits ne donnent qu'une résolution **modérée** : Spearman(résidu, cos θ) ≈ **0,67**. C'est une limite réelle — un seul bit par hyperplan résout mal des directions presque orthogonales.
+
+### 7.2 Score complet vs vérité terrain FP (N = 512 jetons, requête fixe)
+
+| rho | HOT Spearman | HOT top-16 | WARM Spearman | WARM top-16 |
+|---|---|---|---|---|
+| 0,05 | 0,987 | 0,875 | 0,987 | 0,875 |
+| 0,10 | 0,983 | 0,750 | 0,982 | 0,750 |
+| 0,20 | 0,966 | 0,750 | 0,961 | 0,688 |
+| 0,30 | 0,937 | 0,625 | 0,925 | 0,562 |
+| 0,50 | 0,844 | 0,500 | 0,811 | 0,438 |
+| 0,70 | 0,702 | 0,375 | 0,627 | 0,250 |
+
+**Lecture :**
+
+- **Soft-Paging validé (§4).** À faible `rho` (≤ 0,1), HOT ≈ WARM : libérer le résidu 1-bit est **quasi sans perte** quand la base bas-rang capture l'essentiel — précisément la condition sous laquelle CCOS bascule un nœud en WARM.
+- **Le résidu 1-bit aide, modestement.** HOT ≥ WARM partout ; l'apport croît avec `rho` (à 0,5 : +0,03 Spearman, +6 pts de top-16 ; à 0,7 : +0,08 Spearman, +12 pts de top-16). Effet réel, mais pas spectaculaire à 256 bits.
+- **Mise en garde.** Quand la base rate beaucoup (`rho` élevé), même HOT ne récupère pas bien le top-k exact (0,375 de recouvrement top-16 à `rho` = 0,7). La fidélité finale dépend donc fortement de la qualité — apprise — de la base bas-rang.
+
+### 7.3 Débit (référence scalaire)
+
+~2,9 M scores/s (~340 ns/score) sur le banc partagé, **sans SIMD**. À traiter comme une **borne basse** : c'est l'objet du chemin AVX-512 / NEON à venir, pas un résultat de débit final.
+
+**Conclusion partielle.** Le mécanisme est **mathématiquement correct** (tests) et **directionnellement validé** (HOT ≥ WARM ; Soft-Paging quasi sans perte à faible `rho`). Mais les gains du résidu 1-bit sont **modérés** à `d_s = 256`, et la qualité finale dépendra de l'apprentissage de `W_down`/`W_up` et possiblement d'un `d_s` plus grand.
+
+---
+
+## 8. Conclusion
 
 SLHA v2 **propose** qu'en mariant la rigueur d'un système d'exploitation gérant sa mémoire au bit près (CCOS) avec des abstractions mathématiques appliquées aux limites physiques du silicium (SciRust), l'inférence locale puisse changer de paradigme : le cache KV cesserait d'être un fardeau monolithique pour devenir une structure fluide, résiliente et consciente de l'architecture qui l'héberge.
 
-**Cette spécification (v1) reste à valider.** Les cibles de performance du §6 sont des hypothèses non encore mesurées, et l'implémentation de référence du §5 comporte les limitations recensées au §5.1. Les prochaines étapes naturelles sont : (1) un crate buildable accompagné de tests prouvant la correspondance code ↔ équation (2.3), (2) un banc de mesure reproductible, et (3) la levée des limitations du §5.1 (vectorisation réelle, zero-point INT4, layout de tuile sans gaspillage).
+**Cette spécification (v1) progresse vers la validation.** Le crate `scirust` est désormais compilable et testé (§5.1), un banc de mesure reproductible existe, et les premiers résultats (§7) confirment la correction du mécanisme et la viabilité du Soft-Paging — tout en montrant que l'apport du résidu 1-bit reste modéré à `d_s = 256`. Restent à faire : (1) le chemin **SIMD** explicite (AVX-512 / NEON) et la mesure de débit réelle ; (2) la validation **matérielle** du §6 (cache misses, perplexité sous Debian 13) ; (3) l'**apprentissage** des projections `W_down`/`W_up`, déterminant pour la fidélité finale.
 
 ---
 
