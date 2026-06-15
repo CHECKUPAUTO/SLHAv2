@@ -10,7 +10,9 @@
 
 L'inférence locale de grands modèles de langage (LLM) sur des architectures de serveurs denses ou des accélérateurs embarqués se heurte à une contrainte physique immuable : le mur de la bande passante mémoire (Memory-Bandwidth Wall). Le cache KV, en grandissant de manière linéaire avec le contexte, sature les bus d'interconnexion et provoque une sous-utilisation critique des unités de calcul vectoriel.
 
-Nous présentons **SLHA v2** (Sub-Low Rank Hybrid Attention version 2), un mécanisme d'attention asymétrique et élastique conçu pour s'indexer précisément sur la topologie des caches L1, L2, et L3 des processeurs du marché (architectures multi-cœurs x86_64 type Xeon/Epyc et clusters ARM Neoverse/Thor). En fusionnant une compression latente de bas rang et une quantification résiduelle binaire sur 1-bit via l'infrastructure **SciRust**, SLHA v2 permet un "Soft-Paging" de la précision sémantique sans aucune allocation sur le tas, transformant la gestion du contexte en une opération déterministe au bit près, orchestrée par le noyau de système d'exploitation de contexte **CCOS**.
+Nous présentons **SLHA v2** (Sub-Low Rank Hybrid Attention version 2), un mécanisme d'attention asymétrique et élastique conçu pour s'indexer précisément sur la topologie des caches L1, L2, et L3 des processeurs du marché (architectures multi-cœurs x86_64 type Xeon/Epyc et clusters ARM Neoverse/Thor). En fusionnant une compression latente de bas rang et une quantification résiduelle binaire sur 1-bit via l'infrastructure **SciRust**, SLHA v2 vise un "Soft-Paging" de la précision sémantique sans aucune allocation sur le tas, transformant la gestion du contexte en une opération déterministe au bit près, orchestrée par le noyau de système d'exploitation de contexte **CCOS**.
+
+> **Statut (v1).** Ce document est une *spécification*, pas un rapport de résultats. Les cibles chiffrées de performance (§6) sont des **hypothèses non encore mesurées**, et l'implémentation de référence (§5) comporte des limitations explicitement recensées au §5.1.
 
 ---
 
@@ -96,7 +98,7 @@ L'innovation de la version v2 réside dans l'agencement mémoire en **Tuiles Sta
 
 ### 3.1 Alignement Géométrique des Tuiles
 
-Pour maximiser la localité spatiale et temporelle, nous définissons une structure `SciRustSlhaTile` dont l'empreinte mémoire totale est un multiple exact d'une ligne de cache standard :
+Pour maximiser la localité spatiale et temporelle, nous définissons une structure `SciRustSlhaTile` alignée sur 64 octets (`#[repr(C, align(64))]`), dont l'empreinte mémoire est un multiple exact de la ligne de cache de 64 octets :
 
 | Élément de la Tuile SLHA v2 | Format / Spécification | Taille Mémoire | Cible Matérielle Principale |
 |---|---|---|---|
@@ -104,7 +106,11 @@ Pour maximiser la localité spatiale et temporelle, nous définissons une struct
 | Bitmaps de Résidus (d_s = 256) | 4 mots binaires de 64 bits (u64) | 32 Octets | Registres Vectoriels AVX-512 / ARM Neon |
 | Métadonnées de Scaling & λ | 2 Flottants simple précision (f32) | 8 Octets | Alignement et contrôle d'amplitude |
 
-**Invariant Matériel :** Une tuile complète occupe exactement **104 octets**. Lors d'un calcul d'attention, SciRust pré-charge les vecteurs de requêtes dans le cache L1, puis balaie les tuiles de contexte séquentiellement. Le chargement d'une ligne de cache L1 sature instantanément l'unité arithmétique pour 128 dimensions sémantiques.
+**Invariant Matériel (corrigé) :** Les champs *utiles* totalisent **104 octets** (64 + 32 + 8). Mais l'attribut `#[repr(C, align(64))]` impose que la taille du type soit un multiple de son alignement : `size_of::<SciRustSlhaTile>()` vaut donc **128 octets**, dont **24 octets de remplissage (padding)**, et chaque tuile occupe **2 lignes de cache de 64 octets — pas une seule**. (Vérifié sous `rustc 1.94` : `size_of = 128`, `align_of = 64`.) L'ancienne affirmation « occupe exactement 104 octets » *et* « multiple exact d'une ligne de cache » était auto-contradictoire, 104 n'étant pas un multiple de 64.
+
+En revanche, le **bloc latent INT4 occupe à lui seul exactement 64 octets**, soit **une** ligne de cache pleine pour 128 dimensions sémantiques : c'est ce sous-bloc — et non la tuile entière — qui sature l'unité arithmétique en un unique chargement de ligne. Lors d'un calcul d'attention, SciRust pré-charge les vecteurs de requêtes dans le cache L1, puis balaie les tuiles de contexte séquentiellement.
+
+> **Piste de conception (v2.1, hors périmètre de cette révision documentaire).** Pour rendre l'invariant « zéro gaspillage » réellement vrai, deux options : **(a)** exploiter les 24 octets de padding pour des métadonnées utiles (échelle du résidu, identifiant de jeton/position, tête, drapeaux) — ce qui justifie pleinement une tuile de 128 octets ; **(b)** un découpage **SoA** (latent 64 o dans un flux, résidu + métadonnées dans un autre) pour ne toucher qu'une seule ligne par flux. La structure du §5 reste inchangée dans la présente révision.
 
 ### 3.2 Calibration Dynamique du Facteur d'Échelle λ
 
@@ -115,6 +121,8 @@ La constante λ, qui régit le poids de la correction binaire, n'est plus fixe. 
 ```
 
 Si l'arborescence causale du code (analysée par le parser CCOS) détecte une zone hautement critique (par exemple, une signature de fonction fondamentale), σ_E augmente pour forcer le processeur à sur-pondérer la fidélité binaire.
+
+> **Statut :** cette forme de λ est une **heuristique** de type estimateur sign-LSH — le facteur √(π/2) provient de la relation gaussienne 𝔼[|X|] = σ·√(2/π), et le 1/√d_s normalise la variance d'une somme de d_s termes ±1. Elle est **plausible mais non encore validée empiriquement** ; à confirmer (ou infirmer) via le protocole du §6.
 
 ---
 
@@ -144,7 +152,7 @@ Grâce à la décomposition asymétrique de SLHA v2, le noyau CCOS applique le p
 
 ## 5. Implémentation Logicielle du Micro-Noyau Asymétrique
 
-Le noyau d'inférence SLHA v2 optimisé par SciRust est écrit en Rust (édition 2021), respecte l'invariant de zéro allocation dans les boucles critiques, et force le compilateur à utiliser des instructions vectorielles branchless.
+Le noyau d'inférence SLHA v2 est écrit en Rust (édition 2021) et respecte l'invariant de zéro allocation dans les boucles critiques. **Le listing ci-dessous est une implémentation de référence _scalaire_** : il fixe la *sémantique* exacte du score fusionné (déquantification INT4 en ligne + cœur binaire `popcount`), conforme à l'équation (2.3). Il n'est **pas** encore vectorisé et ne doit pas être lu comme du code optimisé prêt pour la production — ses limitations connues sont recensées au §5.1.
 
 Code source complet : [`scirust/src/attention/slha_v2.rs`](scirust/src/attention/slha_v2.rs)
 
@@ -218,11 +226,25 @@ impl SciRustSlhaEngine {
 }
 ```
 
+### 5.1 Limitations connues de l'implémentation de référence
+
+Le listing ci-dessus établit la **sémantique** du score, mais plusieurs éléments contredisent les objectifs de performance affichés et seront corrigés lors de la phase d'implémentation (crate buildable + tests + bench) :
+
+- **`read_volatile` dans la boucle chaude.** Les lectures volatiles interdisent au compilateur (LLVM) de vectoriser, réordonner ou coalescer les accès. Elles **annulent** donc l'auto-vectorisation et la saturation superscalaire visées. Pour de la mémoire normale (≠ MMIO), il faut des lectures ordinaires — et idéalement du SIMD explicite. En conséquence, le commentaire « Boucle déroulée manuellement pour saturer les pipelines superscalaires » est **aspirationnel** : la boucle n'est en l'état ni déroulée à la main, ni vectorisée.
+- **`#[target_feature(enable = "avx2,…")]` sans aucun intrinsèque AVX2.** Le corps est intégralement scalaire ; seul `popcnt` (via `count_ones()`) est réellement exploité. La déclaration `avx2` est donc trompeuse tant qu'aucun chemin SIMD n'existe.
+- **`use std::arch::x86_64::*;` est inutilisé** (avertissement compilateur) tant qu'aucun intrinsèque SIMD n'est appelé.
+- **Déquantification INT4 non signée, sans zero-point.** `(octet & 0x0F) as f32 * scale` ne produit que des valeurs dans `[0, 15]·scale`, donc **toujours ≥ 0**. Or des clés/valeurs réelles sont signées : une quantification symétrique (p. ex. `(nibble − 8)·scale`) ou un zero-point explicite est nécessaire pour représenter la base bas-rang sans biais. *(Changement de sémantique — traité séparément de cette révision purement documentaire.)*
+- **Pas encore un crate.** Le fichier `scirust/src/attention/slha_v2.rs` est orphelin (ni `Cargo.toml`, ni `lib.rs`, ni déclaration `mod`) : il ne compile pas tel quel et n'est donc pas testé. La correspondance code ↔ équation (2.3) reste à prouver par des tests unitaires.
+
+> Ces points relèvent de la phase « crate buildable + tests / kernel optimisé », distincte de la présente mise en cohérence documentaire.
+
 ---
 
 ## 6. Protocole d'Évaluation et Validation Empirique
 
 Pour valider les gains de performance de SLHA v2 par rapport aux structures de graphes et d'attention conventionnelles, trois métriques matérielles strictes doivent être mesurées lors des prochains tests de charge sous Debian 13.
+
+**Les valeurs ci-dessous (≥ 85 %, 3,5×–5×, ΔP < 0,04) sont des cibles de conception / hypothèses à valider, et non des résultats mesurés.** Aucune mesure n'a encore été réalisée ; les §6.1–6.3 décrivent le protocole destiné à les confirmer ou les infirmer.
 
 ### 6.1 Taux de Cache Misses L1/L2/L3
 
@@ -234,19 +256,21 @@ Pour valider les gains de performance de SLHA v2 par rapport aux structures de g
 
 - **Objectif :** Quantifier le gain en jetons par seconde lors des phases d'écriture intensive des agents de codage.
 - **Méthodologie :** Comparaison de la latence du premier jeton (Time to First Token) et du débit continu face à un cache KV FP16 non compressé.
-- **Cible attendue :** Accélération d'un facteur 3.5× à 5× sur les architectures cibles sans accélération matérielle externe dédiée, validant l'efficience de la vectorisation bit à bit.
+- **Cible attendue (hypothèse) :** Accélération d'un facteur 3,5× à 5× sur les architectures cibles sans accélération matérielle externe dédiée. Cette cible **suppose une vectorisation effective** du cœur binaire (cf. §5.1), qui reste à implémenter ; le listing scalaire actuel ne l'atteindra pas tel quel.
 
 ### 6.3 Dérive de la Perplexité en Mode Dégradé (Soft-Paging Validation)
 
 - **Objectif :** Valider que le passage du mode HOT au mode WARM (perte du résidu 1-bit) n'altère pas la capacité sémantique de l'agent à comprendre la structure globale d'un code.
 - **Méthodologie :** Mesure de la perplexité du modèle sur les suites de tests CCOS (`benchmark --cycles 10000`) en basculant sélectivement les nœuds amonts en mode WARM.
-- **Cible attendue :** Dérive mathématique de la perplexité inférieure à ΔP < 0.04, confirmant l'efficacité de la distribution sémantique de bas rang.
+- **Cible attendue (hypothèse) :** Dérive de la perplexité inférieure à ΔP < 0,04, ce qui *confirmerait* — une fois réellement mesuré — l'efficacité de la distribution sémantique de bas rang.
 
 ---
 
 ## 7. Conclusion
 
-SLHA v2 démontre qu'en mariant la rigueur d'un système d'exploitation gérant sa mémoire au bit près (CCOS) avec des abstractions mathématiques appliquées aux limites physiques du silicium (SciRust), l'inférence locale change de paradigme. Le cache KV cesse d'être un fardeau monolithique pour devenir une structure fluide, résiliente et consciente de l'architecture qui l'héberge.
+SLHA v2 **propose** qu'en mariant la rigueur d'un système d'exploitation gérant sa mémoire au bit près (CCOS) avec des abstractions mathématiques appliquées aux limites physiques du silicium (SciRust), l'inférence locale puisse changer de paradigme : le cache KV cesserait d'être un fardeau monolithique pour devenir une structure fluide, résiliente et consciente de l'architecture qui l'héberge.
+
+**Cette spécification (v1) reste à valider.** Les cibles de performance du §6 sont des hypothèses non encore mesurées, et l'implémentation de référence du §5 comporte les limitations recensées au §5.1. Les prochaines étapes naturelles sont : (1) un crate buildable accompagné de tests prouvant la correspondance code ↔ équation (2.3), (2) un banc de mesure reproductible, et (3) la levée des limitations du §5.1 (vectorisation réelle, zero-point INT4, layout de tuile sans gaspillage).
 
 ---
 
