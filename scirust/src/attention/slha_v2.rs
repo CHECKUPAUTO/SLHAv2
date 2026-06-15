@@ -100,30 +100,105 @@ impl SciRustSlhaTile {
     ///
     /// `q_coarse` is `Q · W_up` in the latent space (`D_C` dims); `q_sign` is
     /// the packed sign of `Q · Zᵀ`. In WARM mode the binary term is dropped.
+    ///
+    /// Dispatches to an AVX2 path at runtime when available, else the portable
+    /// scalar path. Both yield the same result up to float reassociation.
+    #[inline]
     pub fn compute_score(&self, q_coarse: &[f32; D_C], q_sign: &[u64; RESIDUAL_WORDS]) -> f32 {
-        // 1. Continuous low-fidelity term: <q_coarse, dequant(latent)>.
-        //    Materialise the latent first so the dot product is a clean,
-        //    auto-vectorisable loop over two contiguous slices.
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::is_x86_feature_detected!("avx2") {
+                // SAFETY: guarded by runtime feature detection.
+                return unsafe { self.compute_score_avx2(q_coarse, q_sign) };
+            }
+        }
+        self.compute_score_scalar(q_coarse, q_sign)
+    }
+
+    /// Binary 1-bit correction: λ · (d_s − 2·popcount(q_sign ^ B)).
+    /// popcount(XOR) is the Hamming distance; d_s − 2·Hamming is the signed dot
+    /// product of the two ±1 sign vectors.
+    #[inline]
+    fn residual_term(&self, q_sign: &[u64; RESIDUAL_WORDS]) -> f32 {
+        let mut hamming = 0u32;
+        for w in 0..RESIDUAL_WORDS {
+            hamming += (q_sign[w] ^ self.residual_bitmap[w]).count_ones();
+        }
+        self.dynamic_lambda * (D_S as f32 - 2.0 * hamming as f32)
+    }
+
+    /// Portable scalar reference path.
+    pub fn compute_score_scalar(
+        &self,
+        q_coarse: &[f32; D_C],
+        q_sign: &[u64; RESIDUAL_WORDS],
+    ) -> f32 {
         let k = self.dequant_latent();
         let mut coarse = 0.0f32;
         for d in 0..D_C {
             coarse += q_coarse[d] * k[d];
         }
-
-        // 2. WARM: residual paged out -> latent base only.
         if self.is_warm() {
             return coarse;
         }
+        coarse + self.residual_term(q_sign)
+    }
 
-        // 3. Binary 1-bit correction: λ · (d_s - 2·popcount(q_sign ^ B)).
-        //    popcount(XOR) is the Hamming distance; d_s - 2·Hamming is the
-        //    signed dot product of the two ±1 sign vectors.
-        let mut hamming = 0u32;
-        for w in 0..RESIDUAL_WORDS {
-            hamming += (q_sign[w] ^ self.residual_bitmap[w]).count_ones();
+    /// AVX2 path: vectorised INT4 dequant + dot for the coarse term.
+    ///
+    /// # Safety
+    /// The `avx2` target feature must be available. The public
+    /// [`Self::compute_score`] dispatcher guarantees this via runtime detection.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn compute_score_avx2(
+        &self,
+        q_coarse: &[f32; D_C],
+        q_sign: &[u64; RESIDUAL_WORDS],
+    ) -> f32 {
+        use std::arch::x86_64::*;
+
+        let scale_v = _mm256_set1_ps(self.scale);
+        let eight = _mm256_set1_ps(8.0);
+        let nibble_mask = _mm_set1_epi8(0x0F);
+        let mut acc = _mm256_setzero_ps();
+        let latent = self.latent_kv.as_ptr();
+        let q = q_coarse.as_ptr();
+
+        // Dequant `(nibble - 8) * scale` for 8 dims, multiply by q, accumulate.
+        macro_rules! group {
+            ($bytes:expr, $off:expr) => {{
+                let n = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32($bytes));
+                let v = _mm256_mul_ps(scale_v, _mm256_sub_ps(n, eight));
+                let qv = _mm256_loadu_ps(q.add($off));
+                acc = _mm256_add_ps(acc, _mm256_mul_ps(v, qv));
+            }};
         }
-        let residual_score = D_S as f32 - 2.0 * hamming as f32;
-        coarse + self.dynamic_lambda * residual_score
+
+        // 4 blocks × 16 bytes = 4 × 32 dims = 128 dims.
+        for blk in 0..4 {
+            let base = blk * 32;
+            let packed = _mm_loadu_si128(latent.add(blk * 16) as *const __m128i);
+            let lo = _mm_and_si128(packed, nibble_mask);
+            // Per-byte high nibble: shift 16-bit lanes, then mask each byte.
+            let hi = _mm_and_si128(_mm_srli_epi16(packed, 4), nibble_mask);
+            // Interleave so nibbles come out in dimension order.
+            let d_lo = _mm_unpacklo_epi8(lo, hi); // dims base..base+15
+            let d_hi = _mm_unpackhi_epi8(lo, hi); // dims base+16..base+31
+            group!(d_lo, base);
+            group!(_mm_srli_si128(d_lo, 8), base + 8);
+            group!(d_hi, base + 16);
+            group!(_mm_srli_si128(d_hi, 8), base + 24);
+        }
+
+        let mut tmp = [0.0f32; 8];
+        _mm256_storeu_ps(tmp.as_mut_ptr(), acc);
+        let coarse: f32 = tmp.iter().sum();
+
+        if self.is_warm() {
+            return coarse;
+        }
+        coarse + self.residual_term(q_sign)
     }
 }
 
@@ -202,6 +277,31 @@ mod tests {
                 dq[d],
                 v[d]
             );
+        }
+    }
+
+    #[test]
+    fn avx2_path_matches_scalar() {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if !std::is_x86_feature_detected!("avx2") {
+                eprintln!("avx2 unavailable — skipping equivalence check");
+                return;
+            }
+            use crate::scenario::{build_tile, generate, Projection};
+            let proj = Projection::new(9);
+            let (q, toks) = generate(123, 64, 0.4);
+            let q_sign = proj.sign_bits(&q);
+            for (i, t) in toks.iter().enumerate() {
+                // Alternate HOT / WARM to cover both branches.
+                let tile = build_tile(&proj, t, i as u32, i % 2 == 0);
+                let s = tile.compute_score_scalar(&q, &q_sign);
+                let a = unsafe { tile.compute_score_avx2(&q, &q_sign) };
+                assert!(
+                    (s - a).abs() <= 1e-3 * (1.0 + s.abs()),
+                    "tile {i}: scalar {s} vs avx2 {a}"
+                );
+            }
         }
     }
 }

@@ -99,7 +99,7 @@ fn main() {
     }
     println!();
 
-    // --- 3) Throughput (scalar reference, NOT SIMD-optimised) ----------------
+    // --- 3) Throughput: scalar vs AVX2 dispatch ------------------------------
     {
         let (q, toks) = generate(1, 4096, 0.3);
         let q_sign = proj.sign_bits(&q);
@@ -108,26 +108,41 @@ fn main() {
             .enumerate()
             .map(|(i, t)| build_tile(&proj, t, i as u32, false))
             .collect();
-
         let iters = 200usize;
+        let scores = (iters * tiles.len()) as f64;
+
+        // Forced scalar path.
         let mut sink = 0.0f32;
         let t0 = Instant::now();
         for _ in 0..iters {
             for tile in &tiles {
-                sink += tile.compute_score(&q, &q_sign);
+                sink += tile.compute_score_scalar(&q, &q_sign);
             }
         }
-        let elapsed = t0.elapsed();
-        let scores = (iters * tiles.len()) as f64;
-        let per = elapsed.as_secs_f64() / scores * 1e9;
-        println!("3) Débit (référence scalaire, NON vectorisée)");
+        let scal = scores / t0.elapsed().as_secs_f64() / 1e6;
+
+        // Dispatched path (AVX2 if available).
+        let mut sink2 = 0.0f32;
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            for tile in &tiles {
+                sink2 += tile.compute_score(&q, &q_sign);
+            }
+        }
+        let disp = scores / t1.elapsed().as_secs_f64() / 1e6;
+
+        #[cfg(target_arch = "x86_64")]
+        let avx2 = std::is_x86_feature_detected!("avx2");
+        #[cfg(not(target_arch = "x86_64"))]
+        let avx2 = false;
+
+        println!("3) Débit  (checksums {:.0} / {:.0})", sink, sink2);
+        println!("   scalaire            : {scal:>6.1} M scores/s");
         println!(
-            "   {:.1} M scores/s  (~{:.1} ns/score)   [checksum {:.1}]",
-            scores / elapsed.as_secs_f64() / 1e6,
-            per,
-            sink
+            "   dispatch (AVX2={:<5}) : {disp:>6.1} M scores/s   (×{:.2} vs scalaire)",
+            avx2,
+            disp / scal
         );
-        println!("   (mesure indicative : le chemin SIMD reste à écrire, cf. §5.1)");
     }
 
     println!("\n   D_K = {D_K}. Toutes les valeurs sont reproductibles (graines fixes).");

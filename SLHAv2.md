@@ -245,10 +245,11 @@ Les limitations de la v1 sont **levées** dans le crate `scirust` (`cargo test` 
 - ✅ **API sûre, pas de `target_feature` trompeur.** Plus d'`unsafe`, plus d'import mort, plus de gate `avx2` sans intrinsèque ; `count_ones()` se compile en `POPCNT` quand la cible le supporte, avec repli portable (ARM Neoverse/Thor inclus).
 - ✅ **Tuile = 128 o sans padding** et **crate compilable + testé** : 7 tests, dont l'identité de Hamming `d_s − 2·popcount` prouvée contre une référence brute, et la correspondance code ↔ eq. (2.3).
 
-**Restant (travaux futurs) :**
+**Avancées récentes & restant :**
 
-- ✍️ Chemin SIMD explicite (AVX-512 / NEON) et microbenchmark de débit. La référence scalaire actuelle tourne à ~2,9 M scores/s (cf. §7) — c'est une borne basse, non optimisée.
-- ✍️ Qualité de la projection bas-rang **apprise** (`W_down`/`W_up`) : hors périmètre du prototype, qui suppose la base capturée idéalement et mesure la machinerie quantification + résidu 1-bit (cf. §7).
+- ✅ **Chemin SIMD AVX2** implémenté : dispatch à l'exécution + repli scalaire portable + test d'équivalence scalaire ≡ AVX2. ~×13 vs scalaire (§7.4). Restent **NEON** (ARM) et **AVX-512**.
+- ◑ **Projection bas-rang apprise** : le §7.3 l'aborde par PCA (optimal linéaire) et révèle que le goulot de fidélité devient alors l'**INT4 du latent**. Reste l'apprentissage de bout en bout des projections conjointement au modèle.
+- ✍️ **Quantification latente plus fine** (zero-point par groupe / NF4) pour lever ce nouveau goulot.
 
 ---
 
@@ -268,7 +269,7 @@ Pour valider les gains de performance de SLHA v2 par rapport aux structures de g
 
 - **Objectif :** Quantifier le gain en jetons par seconde lors des phases d'écriture intensive des agents de codage.
 - **Méthodologie :** Comparaison de la latence du premier jeton (Time to First Token) et du débit continu face à un cache KV FP16 non compressé.
-- **Cible attendue (hypothèse) :** Accélération d'un facteur 3,5× à 5× sur les architectures cibles sans accélération matérielle externe dédiée. Cette cible **suppose une vectorisation effective** du cœur binaire (cf. §5.1), qui reste à implémenter ; le listing scalaire actuel ne l'atteindra pas tel quel.
+- **Cible attendue (hypothèse) :** Accélération d'un facteur 3,5× à 5× sur les architectures cibles sans accélération matérielle externe dédiée. Le chemin **AVX2** existe désormais et donne ~×13 sur le *seul* calcul de score (§7.4) ; mais le 3,5×–5× de **bout en bout** (vs cache KV FP16, bande passante mémoire incluse) reste à mesurer sous charge réelle.
 
 ### 6.3 Dérive de la Perplexité en Mode Dégradé (Soft-Paging Validation)
 
@@ -280,9 +281,9 @@ Pour valider les gains de performance de SLHA v2 par rapport aux structures de g
 
 ## 7. Résultats de Mesure Préliminaires (Prototype SciRust)
 
-Le crate `scirust` inclut un prototype reproductible (`cargo run --example measure --release`) qui mesure la **qualité de l'approximation** du score SLHA sur données synthétiques.
+Le crate `scirust` inclut deux prototypes reproductibles — `cargo run --example measure --release` (résidu `rho` fixé à la main) et `--example measure_learned` (base bas-rang **apprise par PCA**) — qui mesurent la **qualité de l'approximation** du score SLHA sur données synthétiques.
 
-**Portée & honnêteté méthodologique.** Les projections sont **aléatoires** (Gaussiennes) : `Z` (sign-LSH) l'est par conception, mais `W_down`/`W_up` ne sont **pas apprises**. Le prototype suppose donc la base bas-rang *capturée idéalement* et mesure uniquement la machinerie **quantification INT4 + résidu 1-bit + ranking** ; la qualité d'une projection bas-rang apprise (qui ne peut qu'améliorer ces chiffres) est hors périmètre. On note `rho = ||e|| / ||k_real||` la part d'énergie que la base laisse au résidu.
+**Portée & honnêteté méthodologique.** Dans les §7.1–7.2, les projections sont **aléatoires** (Gaussiennes) : `Z` (sign-LSH) l'est par conception, mais `W_down`/`W_up` ne sont pas apprises ; on suppose la base bas-rang *capturée idéalement* et on mesure la machinerie **quantification INT4 + résidu 1-bit + ranking**. On note `rho = ||e|| / ||k_real||` la part d'énergie que la base laisse au résidu. Le **§7.3 lève cette réserve** en apprenant la base par PCA.
 
 ### 7.1 Fidélité du cœur binaire (sign-LSH, d_s = 256)
 
@@ -305,11 +306,35 @@ Sur des paires couvrant toute la plage angulaire, l'estimateur 1-bit suit fidèl
 - **Le résidu 1-bit aide, modestement.** HOT ≥ WARM partout ; l'apport croît avec `rho` (à 0,5 : +0,03 Spearman, +6 pts de top-16 ; à 0,7 : +0,08 Spearman, +12 pts de top-16). Effet réel, mais pas spectaculaire à 256 bits.
 - **Mise en garde.** Quand la base rate beaucoup (`rho` élevé), même HOT ne récupère pas bien le top-k exact (0,375 de recouvrement top-16 à `rho` = 0,7). La fidélité finale dépend donc fortement de la qualité — apprise — de la base bas-rang.
 
-### 7.3 Débit (référence scalaire)
+### 7.3 Projection bas-rang apprise par PCA
 
-~2,9 M scores/s (~340 ns/score) sur le banc partagé, **sans SIMD**. À traiter comme une **borne basse** : c'est l'objet du chemin AVX-512 / NEON à venir, pas un résultat de débit final.
+Pour lever la réserve « base idéale », `measure_learned` **apprend** la projection par PCA (meilleure reconstruction linéaire de rang `D_C`, par Eckart–Young) sur des clés synthétiques à spectre contrôlable (`d_model = 256`, latent 128, `d_s = 256`). `Z` reste aléatoire par conception.
 
-**Conclusion partielle.** Le mécanisme est **mathématiquement correct** (tests) et **directionnellement validé** (HOT ≥ WARM ; Soft-Paging quasi sans perte à faible `rho`). Mais les gains du résidu 1-bit sont **modérés** à `d_s = 256`, et la qualité finale dépendra de l'apprentissage de `W_down`/`W_up` et possiblement d'un `d_s` plus grand.
+| decay | énergie captée | HOT Spearman | HOT top-16 | WARM Spearman | WARM top-16 |
+|---|---|---|---|---|---|
+| 0,99 | 97,6 % | 0,781 | 0,562 | 0,695 | 0,438 |
+| 0,97 | 99,7 % | 0,815 | 0,375 | 0,702 | 0,312 |
+| 0,93 | 99,5 % | 0,879 | 0,500 | 0,603 | 0,188 |
+| 0,85 | 99,1 % | 0,904 | 0,562 | 0,867 | 0,500 |
+
+**Lecture :**
+
+- **Le bas-rang n'est plus le goulot.** La PCA capte 97–99,7 % de l'énergie à rang 128 ; pourtant le Spearman HOT plafonne à 0,78–0,90. Le facteur limitant devient la **quantification INT4 du latent** (échelle unique par tuile), pas la projection.
+- **HOT > WARM partout**, parfois nettement (decay 0,93 : **+0,28** de Spearman). Le résidu 1-bit récupère une part de ce que l'INT4 dégrade.
+- **Résultat négatif assumé : whitener le latent DÉGRADE** (0,859 → 0,750 de HOT Spearman à decay 0,95). L'échelle INT4 unique vaut mieux *non* whitenée — elle alloue spontanément sa résolution aux composantes de forte variance, qui dominent le score. (Le whitening est neutre sur le score ; c'est la quantification qu'il pénalise.)
+
+### 7.4 Débit (scalaire vs AVX2)
+
+Le kernel dispose désormais d'un **chemin AVX2** (dispatch à l'exécution via `is_x86_feature_detected!`, repli scalaire portable) doublé d'un **test d'équivalence** scalaire ≡ AVX2. Sur le banc partagé :
+
+| Chemin | Débit | Rapport |
+|---|---|---|
+| Scalaire (référence) | ~3,0 M scores/s | 1× |
+| AVX2 (dispatch) | ~39,5 M scores/s | **×13** |
+
+Le facteur dépasse les 8× théoriques du SIMD `f32` car le chemin scalaire payait aussi une déquantification INT4 *branchy* que l'AVX2 fusionne. À traiter comme un ordre de grandeur sur banc partagé (pas un chiffre final) ; **NEON** (ARM) et **AVX-512** restent à écrire.
+
+**Conclusion partielle.** Le mécanisme est **mathématiquement correct** (tests, dont l'équivalence scalaire/AVX2) et **directionnellement validé** : HOT ≥ WARM, Soft-Paging quasi sans perte à faible `rho`, accélération SIMD ×13. Deux bémols : (1) avec une base *apprise*, le goulot de fidélité devient l'**INT4 du latent**, pas le bas-rang ; (2) les gains du résidu 1-bit restent **modérés** à `d_s = 256`. Pistes : quantification latente plus fine (zero-point par groupe / NF4), `d_s` plus grand, projections apprises de bout en bout.
 
 ---
 
@@ -317,7 +342,7 @@ Sur des paires couvrant toute la plage angulaire, l'estimateur 1-bit suit fidèl
 
 SLHA v2 **propose** qu'en mariant la rigueur d'un système d'exploitation gérant sa mémoire au bit près (CCOS) avec des abstractions mathématiques appliquées aux limites physiques du silicium (SciRust), l'inférence locale puisse changer de paradigme : le cache KV cesserait d'être un fardeau monolithique pour devenir une structure fluide, résiliente et consciente de l'architecture qui l'héberge.
 
-**Cette spécification (v1) progresse vers la validation.** Le crate `scirust` est désormais compilable et testé (§5.1), un banc de mesure reproductible existe, et les premiers résultats (§7) confirment la correction du mécanisme et la viabilité du Soft-Paging — tout en montrant que l'apport du résidu 1-bit reste modéré à `d_s = 256`. Restent à faire : (1) le chemin **SIMD** explicite (AVX-512 / NEON) et la mesure de débit réelle ; (2) la validation **matérielle** du §6 (cache misses, perplexité sous Debian 13) ; (3) l'**apprentissage** des projections `W_down`/`W_up`, déterminant pour la fidélité finale.
+**Cette spécification (v1) progresse vers la validation.** Le crate `scirust` est compilable et testé (§5.1), deux bancs reproductibles existent, un chemin **AVX2** (×13, §7.4) accélère le kernel, et les résultats (§7) confirment la correction du mécanisme et la viabilité du Soft-Paging. Le point dur révélé par la mesure : avec une base bas-rang *apprise*, le goulot de fidélité devient l'**INT4 du latent**. Restent à faire : (1) une **quantification latente plus fine** + l'extension SIMD à **NEON/AVX-512** ; (2) la validation **matérielle** du §6 (cache misses, perplexité sous Debian 13) ; (3) l'**apprentissage de bout en bout** des projections `W_down`/`W_up`.
 
 ---
 
