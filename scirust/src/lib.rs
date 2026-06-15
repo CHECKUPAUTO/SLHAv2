@@ -17,6 +17,8 @@
 //! used `read_volatile`, which forbids auto-vectorisation).
 
 pub mod attention;
+pub mod learned;
+pub mod linalg;
 pub mod metrics;
 pub mod rng;
 pub mod scenario;

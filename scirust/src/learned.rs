@@ -1,0 +1,276 @@
+//! Learned low-rank projection for SLHA v2.
+//!
+//! The synthetic prototype in [`crate::scenario`] *assumes* the low-rank base
+//! is captured ideally. This module removes that assumption: it **learns** the
+//! projection by PCA (the optimal linear rank-`D_C` reconstruction, by
+//! Eckart–Young) on sample keys, then measures how much energy a real rank-`D_C`
+//! projection actually keeps.
+//!
+//! ## Latent whitening (INT4-friendliness)
+//! PCA latent components have wildly different variances (the eigenvalue
+//! spectrum). A single per-tile INT4 scale is then dominated by the top
+//! component and crushes the small ones. We therefore optionally **whiten** the
+//! latent — store `h_k = (e_k·K) / s_k` with `s_k = sqrt(λ_k)` so every
+//! component has ~unit variance — and **de-whiten the query** — `q_k =
+//! (e_k·Q)·s_k`. The product `Σ q_k h_k = Σ (e_k·Q)(e_k·K)` is **identical** to
+//! the un-whitened score, so whitening is mathematically neutral on the score
+//! while making the INT4 latent far more accurate.
+//!
+//! Dimensions: keys live in `R^d` (`d > D_C`); the latent is `R^{D_C}`; the
+//! sign-LSH residual `Z` maps `R^d -> D_S` bits. Everything still feeds the
+//! *unchanged* fixed-size tile and kernel.
+
+use crate::attention::slha_v2::{
+    quantize_latent, SciRustSlhaTile, D_C, D_S, FLAG_WARM, RESIDUAL_WORDS,
+};
+use crate::linalg::jacobi_eigh;
+use crate::rng::Rng;
+
+/// A PCA-learned projection plus a fixed random sign-LSH `Z` (`D_S × d`).
+pub struct LearnedModel {
+    pub d: usize,
+    /// Top-`D_C` principal eigenvectors, row-major `D_C × d`.
+    evec: Vec<f32>,
+    /// Per-component scale `s_k` (`sqrt(λ_k)` if whitening, else `1.0`).
+    scale: Vec<f32>,
+    pub z: Vec<f32>,
+    /// Fraction of total variance retained by the top-`D_C` subspace.
+    pub captured_energy: f32,
+    pub whiten: bool,
+}
+
+impl LearnedModel {
+    /// Fit by PCA on `train` keys (each length `d`). `Z` is a fixed random
+    /// Johnson–Lindenstrauss projection. With `whiten`, latent components are
+    /// normalised to unit variance (score-preserving — see module docs).
+    pub fn fit(train: &[Vec<f32>], d: usize, seed: u64, whiten: bool) -> Self {
+        assert!(d > D_C, "need d > D_C for a non-trivial residual");
+        let n = train.len().max(1);
+
+        // Empirical (uncentered) covariance, row-major d×d.
+        let mut cov = vec![0.0f32; d * d];
+        for key in train {
+            for i in 0..d {
+                let ki = key[i];
+                let row = i * d;
+                for j in 0..d {
+                    cov[row + j] += ki * key[j];
+                }
+            }
+        }
+        let inv = 1.0 / n as f32;
+        for c in cov.iter_mut() {
+            *c *= inv;
+        }
+
+        let (eigvals, eigvecs) = jacobi_eigh(&cov, d);
+
+        let mut idx: Vec<usize> = (0..d).collect();
+        idx.sort_by(|&a, &b| eigvals[b].partial_cmp(&eigvals[a]).unwrap());
+
+        let total: f64 = eigvals.iter().map(|&x| x.max(0.0)).sum();
+        let kept: f64 = idx[..D_C].iter().map(|&i| eigvals[i].max(0.0)).sum();
+        let captured_energy = if total > 0.0 { (kept / total) as f32 } else { 1.0 };
+
+        // Floor the whitening scale so near-zero eigenvalues don't blow up
+        // pure-noise components (cap the dynamic range at ~sqrt(1e3)).
+        let lambda_top = eigvals[idx[0]].max(1e-12);
+        let floor = lambda_top * 1e-3;
+
+        let mut evec = vec![0.0f32; D_C * d];
+        let mut scale = vec![1.0f32; D_C];
+        for (k, &ei) in idx[..D_C].iter().enumerate() {
+            for i in 0..d {
+                evec[k * d + i] = eigvecs[i * d + ei] as f32;
+            }
+            if whiten {
+                scale[k] = (eigvals[ei].max(floor) as f32).sqrt();
+            }
+        }
+
+        let mut rng = Rng::new(seed);
+        let mut z = vec![0.0f32; D_S * d];
+        rng.fill_gaussian(&mut z);
+
+        LearnedModel { d, evec, scale, z, captured_energy, whiten }
+    }
+
+    #[inline]
+    fn evec_dot(&self, k: usize, v: &[f32]) -> f32 {
+        let row = &self.evec[k * self.d..(k + 1) * self.d];
+        let mut acc = 0.0f32;
+        for i in 0..self.d {
+            acc += row[i] * v[i];
+        }
+        acc
+    }
+
+    /// Whitened latent `h_k = (e_k·key) / s_k` (length `D_C`).
+    pub fn latent(&self, key: &[f32]) -> [f32; D_C] {
+        let mut h = [0.0f32; D_C];
+        for (k, hk) in h.iter_mut().enumerate() {
+            *hk = self.evec_dot(k, key) / self.scale[k];
+        }
+        h
+    }
+
+    /// De-whitened query coarse `q_k = (e_k·Q)·s_k` (length `D_C`), consumed
+    /// directly by `compute_score`.
+    pub fn query_coarse(&self, q: &[f32]) -> [f32; D_C] {
+        let mut h = [0.0f32; D_C];
+        for (k, hk) in h.iter_mut().enumerate() {
+            *hk = self.evec_dot(k, q) * self.scale[k];
+        }
+        h
+    }
+
+    /// Reconstruction `K_coarse_i = Σ_k h_k · s_k · e_k[i]` (length `d`).
+    pub fn reconstruct(&self, h: &[f32; D_C]) -> Vec<f32> {
+        let mut r = vec![0.0f32; self.d];
+        for k in 0..D_C {
+            let w = h[k] * self.scale[k];
+            let row = &self.evec[k * self.d..(k + 1) * self.d];
+            for i in 0..self.d {
+                r[i] += w * row[i];
+            }
+        }
+        r
+    }
+
+    /// Packed sign bits of `Z · v` (`v` length `d`).
+    pub fn sign_bits(&self, v: &[f32]) -> [u64; RESIDUAL_WORDS] {
+        let mut out = [0u64; RESIDUAL_WORDS];
+        for s in 0..D_S {
+            let row = &self.z[s * self.d..(s + 1) * self.d];
+            let mut acc = 0.0f32;
+            for i in 0..self.d {
+                acc += row[i] * v[i];
+            }
+            if acc < 0.0 {
+                out[s >> 6] |= 1u64 << (s & 63);
+            }
+        }
+        out
+    }
+
+    /// Encode a key into a tile. The residual `E = key - reconstruct(latent)` is
+    /// computed from the *un-quantised* latent; the INT4 error is a separate,
+    /// smaller approximation folded into the coarse term.
+    pub fn encode(&self, key: &[f32], pos: u32, warm: bool) -> SciRustSlhaTile {
+        let h = self.latent(key);
+        let (latent, scale) = quantize_latent(&h);
+        let recon = self.reconstruct(&h);
+        let mut e = vec![0.0f32; self.d];
+        for i in 0..self.d {
+            e[i] = key[i] - recon[i];
+        }
+        let bitmap = self.sign_bits(&e);
+        let sigma_e = (e.iter().map(|x| x * x).sum::<f32>() / self.d as f32).sqrt();
+        let lambda = sigma_e * (std::f32::consts::PI / (2.0 * D_S as f32)).sqrt();
+        SciRustSlhaTile {
+            latent_kv: latent,
+            residual_bitmap: bitmap,
+            scale,
+            dynamic_lambda: lambda,
+            residual_sigma: sigma_e,
+            token_id: pos,
+            position: pos,
+            head_id: 0,
+            flags: if warm { FLAG_WARM } else { 0 },
+            _reserved: [0; 8],
+        }
+    }
+}
+
+/// Generate `n` keys in `R^d` from a factor model: `r` random unit factor
+/// directions with geometrically decaying strength `decay^i`, plus isotropic
+/// `noise`. Lower `decay` / higher `noise` ⇒ flatter spectrum ⇒ a rank-`D_C`
+/// projection captures less ⇒ larger residual.
+pub fn gen_keys(seed: u64, n: usize, d: usize, r: usize, decay: f32, noise: f32) -> Vec<Vec<f32>> {
+    let mut rng = Rng::new(seed);
+
+    let mut factors = vec![vec![0.0f32; d]; r];
+    for f in factors.iter_mut() {
+        rng.fill_gaussian(f);
+        let nrm = f.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
+        for x in f.iter_mut() {
+            *x /= nrm;
+        }
+    }
+    let strengths: Vec<f32> = (0..r).map(|i| decay.powi(i as i32)).collect();
+
+    let mut keys = Vec::with_capacity(n);
+    for _ in 0..n {
+        let mut k = vec![0.0f32; d];
+        for fi in 0..r {
+            let g = rng.next_gaussian() * strengths[fi];
+            let fv = &factors[fi];
+            for i in 0..d {
+                k[i] += g * fv[i];
+            }
+        }
+        for i in 0..d {
+            k[i] += noise * rng.next_gaussian();
+        }
+        keys.push(k);
+    }
+    keys
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metrics::{dot, spearman};
+
+    fn run(decay: f32, whiten: bool) -> (f32, f32, f32) {
+        let d = 160;
+        let train = gen_keys(1, 600, d, 200, decay, 0.02);
+        let model = LearnedModel::fit(&train, d, 7, whiten);
+
+        let eval = gen_keys(2, 256, d, 200, decay, 0.02);
+        let q = &gen_keys(3, 1, d, 200, decay, 0.02)[0];
+        let q_coarse = model.query_coarse(q);
+        let q_sign = model.sign_bits(q);
+
+        let mut s_true = Vec::new();
+        let mut s_hot = Vec::new();
+        let mut s_warm = Vec::new();
+        for (i, key) in eval.iter().enumerate() {
+            s_true.push(dot(q, key));
+            let hot = model.encode(key, i as u32, false);
+            let mut warm = hot.clone();
+            warm.flags |= FLAG_WARM;
+            s_hot.push(hot.compute_score(&q_coarse, &q_sign));
+            s_warm.push(warm.compute_score(&q_coarse, &q_sign));
+        }
+        (
+            model.captured_energy,
+            spearman(&s_hot, &s_true),
+            spearman(&s_warm, &s_true),
+        )
+    }
+
+    #[test]
+    fn pca_captures_dominant_subspace_and_hot_beats_warm() {
+        // Default (non-whitened) latent — see `whitening_does_not_help`.
+        let (captured, sp_hot, sp_warm) = run(0.95, false);
+        assert!(captured > 0.8, "captured energy {captured} too low");
+        assert!(sp_hot > 0.8, "HOT Spearman {sp_hot} too low with learned P");
+        assert!(sp_hot + 0.03 >= sp_warm, "HOT {sp_hot} << WARM {sp_warm}");
+    }
+
+    #[test]
+    fn whitening_does_not_help_score_preserving_int4() {
+        // Empirical finding: whitening the PCA latent does NOT improve ranking
+        // (it hurts). A single-scale INT4 already allocates resolution to the
+        // high-variance components that dominate the score; whitening then
+        // re-amplifies their quantisation error through the de-whitened query.
+        // The score itself is identical either way (whitening is neutral on it).
+        let (_, hot_whiten, _) = run(0.9, true);
+        let (_, hot_naive, _) = run(0.9, false);
+        assert!(
+            hot_naive + 0.02 >= hot_whiten,
+            "whitening unexpectedly helped: naive {hot_naive} vs whiten {hot_whiten}"
+        );
+    }
+}
