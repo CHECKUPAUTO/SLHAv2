@@ -28,6 +28,10 @@ pub const D_S: usize = 256;
 pub const LATENT_BYTES: usize = D_C / 2; // 64
 /// Number of `u64` words in the residual bitmap.
 pub const RESIDUAL_WORDS: usize = D_S / 64; // 4
+/// Number of micro-scaling groups for the INT4 latent (one scale byte each).
+pub const N_GROUPS: usize = 8;
+/// Latent dimensions per micro-scaling group.
+pub const GROUP_DIM: usize = D_C / N_GROUPS; // 16
 
 // --- Tile state flags (the CCOS Soft-Paging modes of spec §4) ---------------
 /// Full-fidelity tile: latent + residual both live (cache L1/L2).
@@ -46,7 +50,7 @@ pub const FLAG_WARM: u16 = 1 << 0;
 ///
 /// Byte map (offsets): latent 0..64 | residual 64..96 | scale 96 | lambda 100 |
 /// residual_sigma 104 | token_id 108 | position 112 | head_id 116 |
-/// flags 118 | _reserved 120..128.
+/// flags 118 | group_scales 120..128.
 #[repr(C, align(64))]
 #[derive(Clone)]
 pub struct SciRustSlhaTile {
@@ -54,7 +58,7 @@ pub struct SciRustSlhaTile {
     pub latent_kv: [u8; LATENT_BYTES],
     /// Johnson–Lindenstrauss sign residual: 256 bits. 32 bytes.
     pub residual_bitmap: [u64; RESIDUAL_WORDS],
-    /// INT4 dequantisation scale for `latent_kv`.
+    /// INT4 dequantisation **global** scale; per-group refinement in `group_scales`.
     pub scale: f32,
     /// Binary-correction weight λ (eq. 3.2), calibrated per tile.
     pub dynamic_lambda: f32,
@@ -68,8 +72,9 @@ pub struct SciRustSlhaTile {
     pub head_id: u16,
     /// State flags (`FLAG_HOT` / `FLAG_WARM`).
     pub flags: u16,
-    /// Reserved; keeps the struct at exactly 128 bytes for forward-compat.
-    pub _reserved: [u8; 8],
+    /// Per-group micro-scaling bytes: `effective_scale(g) = scale · gs[g]/255`.
+    /// (Was reserved padding; now refines the INT4 latent — keeps the tile 128 B.)
+    pub group_scales: [u8; N_GROUPS],
 }
 
 impl SciRustSlhaTile {
@@ -79,12 +84,20 @@ impl SciRustSlhaTile {
         self.flags & FLAG_WARM != 0
     }
 
-    /// Dequantise one latent dimension `d` with the signed zero-point.
+    /// Effective dequant scale for dimension `d`: global scale × the dim's
+    /// per-group micro-scale.
+    #[inline]
+    pub fn group_scale(&self, d: usize) -> f32 {
+        self.scale * (self.group_scales[d / GROUP_DIM] as f32 / 255.0)
+    }
+
+    /// Dequantise one latent dimension `d` with the signed zero-point and its
+    /// per-group scale.
     #[inline]
     pub fn dequant_at(&self, d: usize) -> f32 {
         let byte = self.latent_kv[d >> 1];
         let nib = if d & 1 == 0 { byte & 0x0F } else { byte >> 4 };
-        ((nib as i32) - 8) as f32 * self.scale
+        ((nib as i32) - 8) as f32 * self.group_scale(d)
     }
 
     /// Materialise the full dequantised latent vector (mostly for tests).
@@ -158,37 +171,36 @@ impl SciRustSlhaTile {
     ) -> f32 {
         use std::arch::x86_64::*;
 
-        let scale_v = _mm256_set1_ps(self.scale);
+        let global = self.scale;
+        let inv255 = 1.0f32 / 255.0;
         let eight = _mm256_set1_ps(8.0);
         let nibble_mask = _mm_set1_epi8(0x0F);
         let mut acc = _mm256_setzero_ps();
         let latent = self.latent_kv.as_ptr();
         let q = q_coarse.as_ptr();
 
-        // Dequant `(nibble - 8) * scale` for 8 dims, multiply by q, accumulate.
-        macro_rules! group {
-            ($bytes:expr, $off:expr) => {{
+        // Dequant `(nibble - 8) * group_scale` for 8 dims, multiply by q, accumulate.
+        macro_rules! group_half {
+            ($bytes:expr, $off:expr, $gs_v:expr) => {{
                 let n = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32($bytes));
-                let v = _mm256_mul_ps(scale_v, _mm256_sub_ps(n, eight));
+                let v = _mm256_mul_ps($gs_v, _mm256_sub_ps(n, eight));
                 let qv = _mm256_loadu_ps(q.add($off));
                 acc = _mm256_add_ps(acc, _mm256_mul_ps(v, qv));
             }};
         }
 
-        // 4 blocks × 16 bytes = 4 × 32 dims = 128 dims.
-        for blk in 0..4 {
-            let base = blk * 32;
-            let packed = _mm_loadu_si128(latent.add(blk * 16) as *const __m128i);
+        // 8 groups × 8 bytes = 8 × 16 dims = 128 dims; one scale per group.
+        for g in 0..N_GROUPS {
+            let base = g * GROUP_DIM;
+            let gs_v = _mm256_set1_ps(global * (self.group_scales[g] as f32 * inv255));
+            let packed = _mm_loadl_epi64(latent.add(g * 8) as *const __m128i);
             let lo = _mm_and_si128(packed, nibble_mask);
             // Per-byte high nibble: shift 16-bit lanes, then mask each byte.
             let hi = _mm_and_si128(_mm_srli_epi16(packed, 4), nibble_mask);
             // Interleave so nibbles come out in dimension order.
-            let d_lo = _mm_unpacklo_epi8(lo, hi); // dims base..base+15
-            let d_hi = _mm_unpackhi_epi8(lo, hi); // dims base+16..base+31
-            group!(d_lo, base);
-            group!(_mm_srli_si128(d_lo, 8), base + 8);
-            group!(d_hi, base + 16);
-            group!(_mm_srli_si128(d_hi, 8), base + 24);
+            let d16 = _mm_unpacklo_epi8(lo, hi); // dims base..base+15
+            group_half!(d16, base, gs_v);
+            group_half!(_mm_srli_si128(d16, 8), base + 8, gs_v);
         }
 
         let mut tmp = [0.0f32; 8];
@@ -223,6 +235,45 @@ pub fn quantize_latent(v: &[f32; D_C]) -> ([u8; LATENT_BYTES], f32) {
     (out, scale)
 }
 
+/// Per-group ("micro-scaling") signed INT4 quantisation.
+///
+/// Splits the latent into [`N_GROUPS`] groups of [`GROUP_DIM`] dims; each group
+/// gets its own scale stored as a `u8` relative to the global (max) scale:
+/// `effective_scale(g) = global · gs[g]/255`. Because PCA orders the latent by
+/// descending variance, grouping gives the low-variance tail its own finer
+/// scale instead of being crushed by a single global scale. Returns
+/// `(nibbles, global_scale, group_bytes)`.
+pub fn quantize_latent_grouped(v: &[f32; D_C]) -> ([u8; LATENT_BYTES], f32, [u8; N_GROUPS]) {
+    let mut group_scale = [0.0f32; N_GROUPS];
+    for g in 0..N_GROUPS {
+        let mut mx = 0.0f32;
+        for d in g * GROUP_DIM..(g + 1) * GROUP_DIM {
+            mx = mx.max(v[d].abs());
+        }
+        group_scale[g] = mx / 7.0;
+    }
+    let global = group_scale.iter().copied().fold(0.0f32, f32::max);
+    let global = if global > 0.0 { global } else { 1.0 };
+
+    let mut gs = [0u8; N_GROUPS];
+    for g in 0..N_GROUPS {
+        let r = (group_scale[g] / global * 255.0).round();
+        gs[g] = r.clamp(1.0, 255.0) as u8; // never 0, so dequant stays well-defined
+    }
+
+    let mut out = [0u8; LATENT_BYTES];
+    for d in 0..D_C {
+        let eff = global * (gs[d / GROUP_DIM] as f32 / 255.0);
+        let nib = (((v[d] / eff).round() as i32).clamp(-8, 7) + 8) as u8 & 0x0F;
+        if d & 1 == 0 {
+            out[d >> 1] = (out[d >> 1] & 0xF0) | nib;
+        } else {
+            out[d >> 1] = (out[d >> 1] & 0x0F) | (nib << 4);
+        }
+    }
+    (out, global, gs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,9 +292,28 @@ mod tests {
             + 4 + 4 + 4                           // scale, dynamic_lambda, residual_sigma
             + 4 + 4                               // token_id, position
             + 2 + 2                               // head_id, flags
-            + 8; // _reserved
+            + 8; // group_scales
         assert_eq!(field_bytes, 128);
         assert_eq!(field_bytes, size_of::<SciRustSlhaTile>());
+    }
+
+    fn tile_from(
+        latent_kv: [u8; LATENT_BYTES],
+        scale: f32,
+        group_scales: [u8; N_GROUPS],
+    ) -> SciRustSlhaTile {
+        SciRustSlhaTile {
+            latent_kv,
+            residual_bitmap: [0; RESIDUAL_WORDS],
+            scale,
+            dynamic_lambda: 0.0,
+            residual_sigma: 0.0,
+            token_id: 0,
+            position: 0,
+            head_id: 0,
+            flags: FLAG_HOT,
+            group_scales,
+        }
     }
 
     #[test]
@@ -255,18 +325,9 @@ mod tests {
             *x = ((i as f32) - 64.0) / 16.0; // spans negative and positive
         }
         let (packed, scale) = quantize_latent(&v);
-        let tile = SciRustSlhaTile {
-            latent_kv: packed,
-            residual_bitmap: [0; RESIDUAL_WORDS],
-            scale,
-            dynamic_lambda: 0.0,
-            residual_sigma: 0.0,
-            token_id: 0,
-            position: 0,
-            head_id: 0,
-            flags: FLAG_HOT,
-            _reserved: [0; 8],
-        };
+        // [255; N_GROUPS] makes every group's effective scale == the global scale,
+        // i.e. exactly the single-scale behaviour.
+        let tile = tile_from(packed, scale, [255; N_GROUPS]);
         let dq = tile.dequant_latent();
         // At least one strictly-negative reconstructed value (zero-point works).
         assert!(dq.iter().any(|&x| x < 0.0), "no negative values reconstructed");
@@ -278,6 +339,33 @@ mod tests {
                 v[d]
             );
         }
+    }
+
+    #[test]
+    fn grouped_int4_beats_single_on_spread_variance() {
+        // Per-group magnitudes spanning orders of magnitude (like PCA components
+        // ordered by eigenvalue): a single global scale crushes the small
+        // groups, per-group scaling does not.
+        let mut v = [0.0f32; D_C];
+        let mut rng = crate::rng::Rng::new(5);
+        for g in 0..N_GROUPS {
+            let amp = 10f32.powi(-(g as i32)); // 1, 0.1, 0.01, ...
+            for d in g * GROUP_DIM..(g + 1) * GROUP_DIM {
+                v[d] = amp * rng.next_gaussian();
+            }
+        }
+        let sq_err = |t: &SciRustSlhaTile| -> f32 {
+            let dq = t.dequant_latent();
+            (0..D_C).map(|d| (dq[d] - v[d]).powi(2)).sum()
+        };
+        let (p1, s1) = quantize_latent(&v);
+        let e_single = sq_err(&tile_from(p1, s1, [255; N_GROUPS]));
+        let (p2, s2, gs2) = quantize_latent_grouped(&v);
+        let e_grouped = sq_err(&tile_from(p2, s2, gs2));
+        assert!(
+            e_grouped < e_single * 0.5,
+            "grouped err {e_grouped} not clearly < single err {e_single}"
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ Hybrid Attention) décrit dans [`../SLHAv2.md`](../SLHAv2.md).
 
 ## Idée
 
-- Base latente **bas-rang** (`d_c = 128`) stockée en **INT4 signé** (64 o).
+- Base latente **bas-rang** (`d_c = 128`) stockée en **INT4 signé par groupe** (MX, 64 o + 8 octets d'échelles).
 - Résidu de correction **1-bit** via sign-LSH Johnson–Lindenstrauss
   (`d_s = 256` bits, 32 o).
 - Score fusionné continu + binaire (`popcount`), eq. (2.3) du paper.
@@ -39,7 +39,7 @@ faible énergie résiduelle, gains du résidu 1-bit modérés à `d_s = 256`.
 
 | Fichier | Rôle |
 |---|---|
-| `attention/slha_v2.rs` | Tuile `SciRustSlhaTile`, kernel `compute_score` (scalaire + AVX2), quantification INT4 |
+| `attention/slha_v2.rs` | Tuile `SciRustSlhaTile` (128 o), kernel `compute_score` (scalaire + AVX2), quantification INT4 par groupe (MX) |
 | `linalg.rs` | Décomposition propre symétrique (Jacobi) pour la PCA |
 | `learned.rs` | Projection bas-rang **apprise** par PCA + génération de clés à spectre contrôlable |
 | `scenario.rs` | Projection sign-LSH, génération de contexte à énergie résiduelle `rho` contrôlable |

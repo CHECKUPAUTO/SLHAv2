@@ -21,7 +21,8 @@
 //! *unchanged* fixed-size tile and kernel.
 
 use crate::attention::slha_v2::{
-    quantize_latent, SciRustSlhaTile, D_C, D_S, FLAG_WARM, RESIDUAL_WORDS,
+    quantize_latent, quantize_latent_grouped, SciRustSlhaTile, D_C, D_S, FLAG_WARM, N_GROUPS,
+    RESIDUAL_WORDS,
 };
 use crate::linalg::jacobi_eigh;
 use crate::rng::Rng;
@@ -155,10 +156,16 @@ impl LearnedModel {
 
     /// Encode a key into a tile. The residual `E = key - reconstruct(latent)` is
     /// computed from the *un-quantised* latent; the INT4 error is a separate,
-    /// smaller approximation folded into the coarse term.
-    pub fn encode(&self, key: &[f32], pos: u32, warm: bool) -> SciRustSlhaTile {
+    /// smaller approximation folded into the coarse term. `grouped` selects
+    /// per-group micro-scaling (recommended) vs a single global INT4 scale.
+    pub fn encode_with(&self, key: &[f32], pos: u32, warm: bool, grouped: bool) -> SciRustSlhaTile {
         let h = self.latent(key);
-        let (latent, scale) = quantize_latent(&h);
+        let (latent, scale, group_scales) = if grouped {
+            quantize_latent_grouped(&h)
+        } else {
+            let (l, s) = quantize_latent(&h);
+            (l, s, [255u8; N_GROUPS])
+        };
         let recon = self.reconstruct(&h);
         let mut e = vec![0.0f32; self.d];
         for i in 0..self.d {
@@ -177,8 +184,13 @@ impl LearnedModel {
             position: pos,
             head_id: 0,
             flags: if warm { FLAG_WARM } else { 0 },
-            _reserved: [0; 8],
+            group_scales,
         }
+    }
+
+    /// Encode a key into a tile (per-group micro-scaled INT4 latent).
+    pub fn encode(&self, key: &[f32], pos: u32, warm: bool) -> SciRustSlhaTile {
+        self.encode_with(key, pos, warm, true)
     }
 }
 
@@ -272,5 +284,37 @@ mod tests {
             hot_naive + 0.02 >= hot_whiten,
             "whitening unexpectedly helped: naive {hot_naive} vs whiten {hot_whiten}"
         );
+    }
+
+    #[test]
+    fn grouped_int4_does_not_hurt_end_to_end() {
+        // Per-group MX scaling halves latent reconstruction error (see the
+        // slha_v2 unit test); end-to-end it must be at least as good as a single
+        // scale. (The end-to-end gain is small here because the score is
+        // dominated by high-variance components a single scale already handles.)
+        let d = 160;
+        let train = gen_keys(1, 600, d, 200, 0.93, 0.02);
+        let model = LearnedModel::fit(&train, d, 7, false);
+        let eval = gen_keys(2, 256, d, 200, 0.93, 0.02);
+        let q = &gen_keys(3, 1, d, 200, 0.93, 0.02)[0];
+        let q_coarse = model.query_coarse(q);
+        let q_sign = model.sign_bits(q);
+
+        let hot_sp = |grouped: bool| {
+            let mut st = Vec::new();
+            let mut sh = Vec::new();
+            for (i, key) in eval.iter().enumerate() {
+                st.push(dot(q, key));
+                sh.push(
+                    model
+                        .encode_with(key, i as u32, false, grouped)
+                        .compute_score(&q_coarse, &q_sign),
+                );
+            }
+            spearman(&sh, &st)
+        };
+        let single = hot_sp(false);
+        let grouped = hot_sp(true);
+        assert!(grouped + 0.02 >= single, "grouped {grouped} worse than single {single}");
     }
 }

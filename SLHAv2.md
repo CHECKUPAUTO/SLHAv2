@@ -249,7 +249,7 @@ Les limitations de la v1 sont **levées** dans le crate `scirust` (`cargo test` 
 
 - ✅ **Chemin SIMD AVX2** implémenté : dispatch à l'exécution + repli scalaire portable + test d'équivalence scalaire ≡ AVX2. ~×13 vs scalaire (§7.4). Restent **NEON** (ARM) et **AVX-512**.
 - ◑ **Projection bas-rang apprise** : le §7.3 l'aborde par PCA (optimal linéaire) et révèle que le goulot de fidélité devient alors l'**INT4 du latent**. Reste l'apprentissage de bout en bout des projections conjointement au modèle.
-- ✍️ **Quantification latente plus fine** (zero-point par groupe / NF4) pour lever ce nouveau goulot.
+- ◑ **Quantification latente par groupe (MX)** implémentée : 8 micro-échelles `u8` logées dans les ex-octets `reserved` (scalaire + AVX2, test). Elle réduit >2× l'erreur de reconstruction mais le gain end-to-end est marginal — le vrai plafond est la **résolution 4 bits** (§7.3). Pistes : **INT8 / NF4** latent, ou `d_s` plus grand.
 
 ---
 
@@ -306,22 +306,23 @@ Sur des paires couvrant toute la plage angulaire, l'estimateur 1-bit suit fidèl
 - **Le résidu 1-bit aide, modestement.** HOT ≥ WARM partout ; l'apport croît avec `rho` (à 0,5 : +0,03 Spearman, +6 pts de top-16 ; à 0,7 : +0,08 Spearman, +12 pts de top-16). Effet réel, mais pas spectaculaire à 256 bits.
 - **Mise en garde.** Quand la base rate beaucoup (`rho` élevé), même HOT ne récupère pas bien le top-k exact (0,375 de recouvrement top-16 à `rho` = 0,7). La fidélité finale dépend donc fortement de la qualité — apprise — de la base bas-rang.
 
-### 7.3 Projection bas-rang apprise par PCA
+### 7.3 Projection bas-rang apprise par PCA, et quantification par groupe
 
-Pour lever la réserve « base idéale », `measure_learned` **apprend** la projection par PCA (meilleure reconstruction linéaire de rang `D_C`, par Eckart–Young) sur des clés synthétiques à spectre contrôlable (`d_model = 256`, latent 128, `d_s = 256`). `Z` reste aléatoire par conception.
+Pour lever la réserve « base idéale », `measure_learned` **apprend** la projection par PCA (meilleure reconstruction linéaire de rang `D_C`, par Eckart–Young) sur des clés synthétiques à spectre contrôlable (`d_model = 256`, latent 128, `d_s = 256`). `Z` reste aléatoire par conception. Le latent INT4 utilise désormais des **micro-échelles par groupe** (8 groupes de 16 dims, une échelle `u8` chacun, logées dans les 8 octets jadis « reserved » — la tuile reste à 128 o).
 
 | decay | énergie captée | HOT Spearman | HOT top-16 | WARM Spearman | WARM top-16 |
 |---|---|---|---|---|---|
-| 0,99 | 97,6 % | 0,781 | 0,562 | 0,695 | 0,438 |
-| 0,97 | 99,7 % | 0,815 | 0,375 | 0,702 | 0,312 |
-| 0,93 | 99,5 % | 0,879 | 0,500 | 0,603 | 0,188 |
-| 0,85 | 99,1 % | 0,904 | 0,562 | 0,867 | 0,500 |
+| 0,99 | 97,6 % | 0,788 | 0,562 | 0,703 | 0,438 |
+| 0,97 | 99,7 % | 0,814 | 0,375 | 0,700 | 0,312 |
+| 0,93 | 99,5 % | 0,884 | 0,438 | 0,609 | 0,188 |
+| 0,85 | 99,1 % | 0,905 | 0,562 | 0,871 | 0,500 |
 
 **Lecture :**
 
-- **Le bas-rang n'est plus le goulot.** La PCA capte 97–99,7 % de l'énergie à rang 128 ; pourtant le Spearman HOT plafonne à 0,78–0,90. Le facteur limitant devient la **quantification INT4 du latent** (échelle unique par tuile), pas la projection.
+- **Le bas-rang n'est plus le goulot.** La PCA capte 97–99,7 % de l'énergie à rang 128 ; pourtant le Spearman HOT plafonne à 0,79–0,90. Le facteur limitant devient la **quantification INT4 du latent**, pas la projection.
 - **HOT > WARM partout**, parfois nettement (decay 0,93 : **+0,28** de Spearman). Le résidu 1-bit récupère une part de ce que l'INT4 dégrade.
-- **Résultat négatif assumé : whitener le latent DÉGRADE** (0,859 → 0,750 de HOT Spearman à decay 0,95). L'échelle INT4 unique vaut mieux *non* whitenée — elle alloue spontanément sa résolution aux composantes de forte variance, qui dominent le score. (Le whitening est neutre sur le score ; c'est la quantification qu'il pénalise.)
+- **Quantification par groupe (MX) : forte baisse de l'erreur de reconstruction, gain end-to-end marginal.** Le groupage divise par **>2×** l'erreur de reconstruction du latent sur un spectre étagé (prouvé par test), mais ne déplace quasiment pas le ranking ici (decay 0,93 : HOT 0,879 → 0,884 ; top-16 inchangé). Raison : le score est dominé par les composantes de **forte** variance, que l'échelle unique représente déjà bien. **Le vrai plafond est la résolution 4 bits** sur ces composantes — pas la plage dynamique inter-groupes. Le lever demande plus de bits (INT8 / NF4) ou un `d_s` plus grand, pas un groupage plus fin.
+- **Résultat négatif assumé : whitener le latent DÉGRADE** (0,859 → 0,750 de HOT Spearman à decay 0,95). L'échelle INT4 vaut mieux *non* whitenée — elle alloue spontanément sa résolution aux composantes de forte variance. (Neutre sur le score ; c'est la quantification qu'il pénalise.)
 
 ### 7.4 Débit (scalaire vs AVX2)
 
@@ -342,7 +343,7 @@ Le facteur dépasse les 8× théoriques du SIMD `f32` car le chemin scalaire pay
 
 SLHA v2 **propose** qu'en mariant la rigueur d'un système d'exploitation gérant sa mémoire au bit près (CCOS) avec des abstractions mathématiques appliquées aux limites physiques du silicium (SciRust), l'inférence locale puisse changer de paradigme : le cache KV cesserait d'être un fardeau monolithique pour devenir une structure fluide, résiliente et consciente de l'architecture qui l'héberge.
 
-**Cette spécification (v1) progresse vers la validation.** Le crate `scirust` est compilable et testé (§5.1), deux bancs reproductibles existent, un chemin **AVX2** (×13, §7.4) accélère le kernel, et les résultats (§7) confirment la correction du mécanisme et la viabilité du Soft-Paging. Le point dur révélé par la mesure : avec une base bas-rang *apprise*, le goulot de fidélité devient l'**INT4 du latent**. Restent à faire : (1) une **quantification latente plus fine** + l'extension SIMD à **NEON/AVX-512** ; (2) la validation **matérielle** du §6 (cache misses, perplexité sous Debian 13) ; (3) l'**apprentissage de bout en bout** des projections `W_down`/`W_up`.
+**Cette spécification (v1) progresse vers la validation.** Le crate `scirust` est compilable et testé (§5.1), deux bancs reproductibles existent, un chemin **AVX2** (×13, §7.4) accélère le kernel, et les résultats (§7) confirment la correction du mécanisme et la viabilité du Soft-Paging. Le point dur révélé par la mesure : avec une base bas-rang *apprise*, le goulot de fidélité devient l'**INT4 du latent** — et le groupage MX (déjà en place) ne le lève pas, car le plafond est la résolution 4 bits (§7.3). Restent à faire : (1) une **résolution latente plus large** (INT8 / NF4) et l'extension SIMD à **NEON / AVX-512** ; (2) la validation **matérielle** du §6 (cache misses, perplexité sous Debian 13) ; (3) l'**apprentissage de bout en bout** des projections `W_down`/`W_up`.
 
 ---
 

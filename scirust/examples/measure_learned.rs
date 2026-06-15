@@ -13,7 +13,7 @@ use scirust::learned::{gen_keys, LearnedModel};
 use scirust::metrics::{dot, spearman, topk_overlap};
 
 /// Returns (HOT Spearman, HOT top16, WARM Spearman, WARM top16).
-fn evaluate(model: &LearnedModel, decay: f32) -> (f32, f32, f32, f32) {
+fn evaluate(model: &LearnedModel, decay: f32, grouped: bool) -> (f32, f32, f32, f32) {
     let d = model.d;
     let eval = gen_keys(20, 512, d, 256, decay, 0.02);
     let q = &gen_keys(30, 1, d, 256, decay, 0.02)[0];
@@ -25,7 +25,7 @@ fn evaluate(model: &LearnedModel, decay: f32) -> (f32, f32, f32, f32) {
     let mut s_warm = Vec::new();
     for (i, key) in eval.iter().enumerate() {
         s_true.push(dot(q, key));
-        let hot: SciRustSlhaTile = model.encode(key, i as u32, false);
+        let hot: SciRustSlhaTile = model.encode_with(key, i as u32, false, grouped);
         let mut warm = hot.clone();
         warm.flags |= FLAG_WARM;
         s_hot.push(hot.compute_score(&q_coarse, &q_sign));
@@ -62,7 +62,7 @@ fn main() {
         let train = gen_keys(10, n_train, d, r, decay, 0.02);
         let model = LearnedModel::fit(&train, d, 0xC0FFEE, false);
         let rho_eff = (1.0 - model.captured_energy).max(0.0).sqrt();
-        let (h_sp, h_tk, w_sp, w_tk) = evaluate(&model, decay);
+        let (h_sp, h_tk, w_sp, w_tk) = evaluate(&model, decay, true);
         println!(
             "  {:>6.2} {:>8.1}% {:>6.2} | {:>8.3} {:>8.3} | {:>8.3} {:>8.3}",
             decay,
@@ -75,23 +75,20 @@ fn main() {
         );
     }
 
-    // --- Effet du whitening du latent (à decay fixe) -------------------------
-    println!("\n  Effet du whitening du latent INT4 (decay = 0.95) :");
-    let train = gen_keys(10, n_train, d, r, 0.95, 0.02);
-    for &whiten in &[false, true] {
-        let model = LearnedModel::fit(&train, d, 0xC0FFEE, whiten);
-        let (h_sp, _h_tk, w_sp, _w_tk) = evaluate(&model, 0.95);
-        println!(
-            "    whiten = {:<5} -> HOT Spearman {:.3}   WARM Spearman {:.3}",
-            whiten, h_sp, w_sp
-        );
+    // --- INT4 latent : échelle unique vs micro-échelles par groupe -----------
+    println!("\n  Quantification du latent INT4 (decay = 0.93) :");
+    let train = gen_keys(10, n_train, d, r, 0.93, 0.02);
+    let model = LearnedModel::fit(&train, d, 0xC0FFEE, false);
+    for (label, grouped) in [("échelle unique", false), ("8 groupes (MX)", true)] {
+        let (h_sp, h_tk, w_sp, _w_tk) = evaluate(&model, 0.93, grouped);
+        println!("    {label:<16} -> HOT Spearman {h_sp:.3} (top16 {h_tk:.3})   WARM {w_sp:.3}");
     }
 
     println!(
-        "\n  Lecture : avec une base bas-rang APPRISE, la PCA capte ~97–99,7 % de\n  \
-         l'énergie ; le goulot devient alors l'INT4 du latent (Spearman plafonné).\n  \
-         Le résidu 1-bit aide partout (HOT > WARM, parfois +0,2). Le whitening, lui,\n  \
-         DÉGRADE : l'échelle INT4 unique vaut mieux non whitenée, car elle alloue sa\n  \
-         résolution aux composantes de forte variance qui dominent le score."
+        "\n  Lecture : la PCA capte ~97–99,7 % de l'énergie ; le goulot devient alors\n  \
+         l'INT4 du latent. Les micro-échelles par groupe (8×u8, logées dans les 8\n  \
+         octets jadis « reserved ») donnent à la queue de faible variance sa propre\n  \
+         échelle et récupèrent de la fidélité, sans agrandir la tuile. Le résidu\n  \
+         1-bit aide partout (HOT > WARM). (Le whitening, lui, dégrade — cf. test.)"
     );
 }

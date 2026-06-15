@@ -16,7 +16,7 @@
 //! captured exactly and measure the quantisation + 1-bit-residual machinery.
 
 use crate::attention::slha_v2::{
-    quantize_latent, SciRustSlhaTile, D_C, D_S, FLAG_HOT, FLAG_WARM, RESIDUAL_WORDS,
+    quantize_latent_grouped, SciRustSlhaTile, D_C, D_S, FLAG_HOT, FLAG_WARM, RESIDUAL_WORDS,
 };
 use crate::metrics::rms;
 use crate::rng::Rng;
@@ -67,7 +67,7 @@ pub struct ContextToken {
 /// Build a tile for a context token. `warm = true` marks the residual as paged
 /// out (CCOS WARM mode); λ is calibrated per tile from σ_E via eq. (3.2).
 pub fn build_tile(proj: &Projection, tok: &ContextToken, pos: u32, warm: bool) -> SciRustSlhaTile {
-    let (latent, scale) = quantize_latent(&tok.k_coarse);
+    let (latent, scale, group_scales) = quantize_latent_grouped(&tok.k_coarse);
     let bitmap = proj.sign_bits(&tok.e);
     let sigma_e = rms(&tok.e);
     // eq. (3.2): λ = σ_E · sqrt(π / (2 · d_s)).
@@ -82,7 +82,7 @@ pub fn build_tile(proj: &Projection, tok: &ContextToken, pos: u32, warm: bool) -
         position: pos,
         head_id: 0,
         flags: if warm { FLAG_WARM } else { FLAG_HOT },
-        _reserved: [0; 8],
+        group_scales,
     }
 }
 
