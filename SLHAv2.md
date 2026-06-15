@@ -264,18 +264,21 @@ Pour valider les gains de performance de SLHA v2 par rapport aux structures de g
 - **Objectif :** Démontrer que le tuilage statique élimine le phénomène d'attente CPU.
 - **Méthodologie :** Instrumentation du binaire via les compteurs de performance matériels du processeur (`perf stat -e L1-dcache-load-misses,l2_rqsts.miss,LLC-load-misses`).
 - **Cible attendue :** Une baisse de ≥ 85% des lignes de cache invalidées lors du balayage d'un contexte de 32 000 jetons.
+- **Statut :** non mesuré dans ce sandbox (`perf` absent, `perf_event_paranoid = 2`). L'effet de cache est montré *indirectement* par la chute de débit avec la taille de contexte (§7.5).
 
 ### 6.2 Débit d'Inférence sous Stress Temporel
 
 - **Objectif :** Quantifier le gain en jetons par seconde lors des phases d'écriture intensive des agents de codage.
 - **Méthodologie :** Comparaison de la latence du premier jeton (Time to First Token) et du débit continu face à un cache KV FP16 non compressé.
 - **Cible attendue (hypothèse) :** Accélération d'un facteur 3,5× à 5× sur les architectures cibles sans accélération matérielle externe dédiée. Le chemin **AVX2** existe désormais et donne ~×13 sur le *seul* calcul de score (§7.4) ; mais le 3,5×–5× de **bout en bout** (vs cache KV FP16, bande passante mémoire incluse) reste à mesurer sous charge réelle.
+- **Mesure partielle (§7.5) :** au niveau du kernel, SLHA score **~2,5× plus de tokens/s** qu'une référence bf16, en lisant 2× moins d'octets/token. Le facteur de bout en bout (decode LLM complet) reste à mesurer.
 
 ### 6.3 Dérive de la Perplexité en Mode Dégradé (Soft-Paging Validation)
 
 - **Objectif :** Valider que le passage du mode HOT au mode WARM (perte du résidu 1-bit) n'altère pas la capacité sémantique de l'agent à comprendre la structure globale d'un code.
 - **Méthodologie :** Mesure de la perplexité du modèle sur les suites de tests CCOS (`benchmark --cycles 10000`) en basculant sélectivement les nœuds amonts en mode WARM.
 - **Cible attendue (hypothèse) :** Dérive de la perplexité inférieure à ΔP < 0,04, ce qui *confirmerait* — une fois réellement mesuré — l'efficacité de la distribution sémantique de bas rang.
+- **Statut :** non mesurable sans modèle ni jeu de données réels. En attendant, le §7 fournit des **proxys** quantitatifs (fidélité du score, dérive HOT→WARM par rang/top-k).
 
 ---
 
@@ -335,7 +338,24 @@ Le kernel dispose désormais d'un **chemin AVX2** (dispatch à l'exécution via 
 
 Le facteur dépasse les 8× théoriques du SIMD `f32` car le chemin scalaire payait aussi une déquantification INT4 *branchy* que l'AVX2 fusionne. À traiter comme un ordre de grandeur sur banc partagé. Un **chemin NEON** (aarch64) existe également, **vérifié par cross-compilation** mais non chronométré ici (pas de matériel ARM sur le banc) ; **AVX-512** reste à écrire.
 
-**Conclusion partielle.** Le mécanisme est **mathématiquement correct** (tests, dont l'équivalence scalaire/AVX2) et **directionnellement validé** : HOT ≥ WARM, Soft-Paging quasi sans perte à faible `rho`, accélération SIMD ×13. Deux bémols : (1) avec une base *apprise*, le goulot de fidélité devient l'**INT4 du latent**, pas le bas-rang ; (2) les gains du résidu 1-bit restent **modérés** à `d_s = 256`. Pistes : quantification latente plus fine (zero-point par groupe / NF4), `d_s` plus grand, projections apprises de bout en bout.
+### 7.5 Trafic mémoire & débit vs une référence bf16 (§6.2, au niveau kernel)
+
+`bench_vs_fp16` compare le scoring d'une tuile SLHA (**128 o/token**) à un produit scalaire sur une clé **bf16** (`d_k·2 = 256` o/token), les deux en AVX2 (le comparatif isole le format mémoire, pas la chance de codegen).
+
+| Contexte (tokens) | empreinte SLHA / bf16 | SLHA | bf16 |
+|---|---|---|---|
+| 8 192 | 1 / 2 Mo | 42,4 M scores/s | 17,0 M scores/s |
+| 65 536 | 8 / 16 Mo | 40,1 | 16,9 |
+| 262 144 | 32 / 64 Mo | 35,4 | 14,0 |
+| 1 048 576 | 128 / 256 Mo | 29,9 | 13,8 |
+
+**Lecture :**
+
+- **~2,5× plus de tokens/s** pour SLHA, à débit mémoire (GB/s) comparable : lire **2× moins d'octets/token** (+ un dénibblage INT4→f32 plus court que le décodage bf16) se convertit directement en débit. C'est la thèse du « mur de bande passante » vérifiée au niveau du kernel.
+- **Le débit décroît quand le contexte grandit** (42→30 M/s pour SLHA) : effet de cache visible *indirectement*, l'empreinte plus petite de SLHA la gardant résidente plus longtemps.
+- **Honnêteté :** le LLC fait 260 Mo sur ce banc — on **ne sature pas la DRAM** (GB/s mesurés ≪ pic DRAM) ; le gain vient du volume d'octets et des uops, pas d'une limite DRAM atteinte. Les **compteurs de cache matériels (§6.1) sont indisponibles** ici (`perf` absent, `perf_event_paranoid = 2`). Sur un LLC plus petit, ou en décodage réellement DRAM-bound, l'avantage de SLHA serait plus marqué.
+
+**Conclusion partielle.** Le mécanisme est **mathématiquement correct** (tests, dont les équivalences scalaire/AVX2) et **directionnellement validé** : HOT ≥ WARM, Soft-Paging quasi sans perte à faible `rho`, accélération SIMD ×13, et **~2,5× de tokens/s vs bf16** grâce à l'empreinte 2× plus petite (§7.5). Deux bémols : (1) avec une base *apprise*, le goulot de fidélité devient l'**INT4 du latent** ; (2) les gains du résidu 1-bit restent **modérés** à `d_s = 256`. Pistes : résolution latente plus large (INT8 / NF4), `d_s` plus grand, projections apprises de bout en bout.
 
 ---
 
@@ -343,7 +363,7 @@ Le facteur dépasse les 8× théoriques du SIMD `f32` car le chemin scalaire pay
 
 SLHA v2 **propose** qu'en mariant la rigueur d'un système d'exploitation gérant sa mémoire au bit près (CCOS) avec des abstractions mathématiques appliquées aux limites physiques du silicium (SciRust), l'inférence locale puisse changer de paradigme : le cache KV cesserait d'être un fardeau monolithique pour devenir une structure fluide, résiliente et consciente de l'architecture qui l'héberge.
 
-**Cette spécification (v1) progresse vers la validation.** Le crate `scirust` est compilable et testé (§5.1), deux bancs reproductibles existent, un chemin **AVX2** (×13, §7.4) accélère le kernel, et les résultats (§7) confirment la correction du mécanisme et la viabilité du Soft-Paging. Le point dur révélé par la mesure : avec une base bas-rang *apprise*, le goulot de fidélité devient l'**INT4 du latent** — et le groupage MX (déjà en place) ne le lève pas, car le plafond est la résolution 4 bits (§7.3). Restent à faire : (1) une **résolution latente plus large** (INT8 / NF4) et l'extension SIMD à **AVX-512** (AVX2 et NEON déjà en place) ; (2) la validation **matérielle** du §6 (cache misses, perplexité sous Debian 13) ; (3) l'**apprentissage de bout en bout** des projections `W_down`/`W_up`.
+**Cette spécification (v1) progresse vers la validation.** Le crate `scirust` est compilable et testé (§5.1), deux bancs reproductibles existent, un chemin **AVX2** (×13, §7.4) accélère le kernel, et les résultats (§7) confirment la correction du mécanisme et la viabilité du Soft-Paging. Le point dur révélé par la mesure : avec une base bas-rang *apprise*, le goulot de fidélité devient l'**INT4 du latent** — et le groupage MX (déjà en place) ne le lève pas, car le plafond est la résolution 4 bits (§7.3). Restent à faire : (1) une **résolution latente plus large** (INT8 / NF4) et l'extension SIMD à **AVX-512** (AVX2 et NEON déjà en place) ; (2) la validation **matérielle complète** du §6 (compteurs de cache via `perf`, perplexité d'un vrai modèle) — déjà amorcée au niveau kernel en §7.5 ; (3) l'**apprentissage de bout en bout** des projections `W_down`/`W_up`.
 
 ---
 

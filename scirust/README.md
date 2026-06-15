@@ -14,10 +14,11 @@ Hybrid Attention) décrit dans [`../SLHAv2.md`](../SLHAv2.md).
 ## Build / test / mesure
 
 ```sh
-cargo test                                    # 11 tests : Hamming (vs réf. brute), layout 128 o,
-                                              # zero-point INT4, WARM, sign-LSH, Jacobi, PCA, AVX2≡scalaire
+cargo test                                    # 13 tests : Hamming, layout 128 o, zero-point INT4, WARM,
+                                              # sign-LSH, Jacobi, PCA, INT4 groupé (MX), AVX2≡scalaire (+ NEON sur ARM)
 cargo run --example measure --release         # rho fixé : fidélité, HOT vs WARM, débit scalaire vs AVX2
-cargo run --example measure_learned --release # base apprise par PCA : HOT vs WARM par spectre
+cargo run --example measure_learned --release # base apprise par PCA + INT4 groupé (MX)
+cargo run --example bench_vs_fp16 --release   # SLHA 128 o vs clé bf16 256 o : débit & trafic mémoire
 ```
 
 **Zéro dépendance externe** : le crate compile et se teste entièrement
@@ -49,4 +50,5 @@ faible énergie résiduelle, gains du résidu 1-bit modérés à `d_s = 256`.
 | `rng.rs` | PRNG déterministe (SplitMix64) + échantillonneur gaussien |
 | `../tests/slha.rs` | Tests d'intégration (preuves) |
 | `../examples/measure.rs` | Prototype de mesure (`rho` fixé) |
-| `../examples/measure_learned.rs` | Prototype avec base apprise (PCA) |
+| `../examples/measure_learned.rs` | Prototype avec base apprise (PCA) + INT4 groupé (MX) |
+| `../examples/bench_vs_fp16.rs` | Débit / trafic mémoire : SLHA (128 o) vs clé bf16 (256 o) |
