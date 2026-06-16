@@ -247,7 +247,7 @@ Les limitations de la v1 sont **levées** dans le crate `scirust` (`cargo test` 
 
 **Avancées récentes & restant :**
 
-- ✅ **Chemins SIMD : AVX2 + NEON.** AVX2 (x86_64, dispatch runtime, ~×13, §7.4) **et** NEON (aarch64, baseline), chacun avec un test d'équivalence ≡ scalaire. Le NEON est **vérifié par cross-compilation** (`aarch64-unknown-linux-gnu`) ; son équivalence à l'exécution (`neon_path_matches_scalar`) s'exécute sur matériel ARM. Reste **AVX-512**.
+- ✅ **Chemins SIMD : AVX2, AVX-512 (x86_64) + NEON (aarch64).** Dispatch runtime (AVX-512 > AVX2 > scalaire), chacun avec un test d'équivalence ≡ scalaire (AVX2 ×11,5, AVX-512 ×14,1, §7.4). NEON **vérifié par cross-compilation** (`aarch64-unknown-linux-gnu`) ; son équivalence runtime tourne sur matériel ARM.
 - ◑ **Projection bas-rang apprise** : le §7.3 l'aborde par PCA (optimal linéaire) et révèle que le goulot de fidélité devient alors l'**INT4 du latent**. Reste l'apprentissage de bout en bout des projections conjointement au modèle.
 - ◑ **Quantification latente par groupe (MX)** implémentée : 8 micro-échelles `u8` logées dans les ex-octets `reserved` (scalaire + AVX2, test). Elle réduit >2× l'erreur de reconstruction mais le gain end-to-end est marginal — le vrai plafond est la **résolution 4 bits** (§7.3). Pistes : **INT8 / NF4** latent, ou `d_s` plus grand.
 
@@ -328,16 +328,17 @@ Pour lever la réserve « base idéale », `measure_learned` **apprend** la proj
 - **Résultat négatif assumé : whitener le latent DÉGRADE** (0,859 → 0,750 à decay 0,95) — l'échelle INT4 alloue mieux sa résolution non whitenée.
 - **Attention à l'interprétation.** On pourrait croire ce plafond dû à l'INT4 du latent ; le **§7.8 le réfute** (INT8 n'améliore pas le WARM). Le vrai facteur limitant du coarse est la **projection bas-rang**, pas la quantification.
 
-### 7.4 Débit (scalaire vs AVX2)
+### 7.4 Débit (scalaire vs AVX2 vs AVX-512)
 
-Le kernel dispose désormais d'un **chemin AVX2** (dispatch à l'exécution via `is_x86_feature_detected!`, repli scalaire portable) doublé d'un **test d'équivalence** scalaire ≡ AVX2. Sur le banc partagé :
+Le kernel dispose de chemins **AVX2** et **AVX-512** (dispatch à l'exécution via `is_x86_feature_detected!`, ordre AVX-512 > AVX2 > scalaire, repli portable), chacun avec un **test d'équivalence** ≡ scalaire. Sur le banc partagé :
 
 | Chemin | Débit | Rapport |
 |---|---|---|
-| Scalaire (référence) | ~3,0 M scores/s | 1× |
-| AVX2 (dispatch) | ~39,5 M scores/s | **×13** |
+| Scalaire (référence) | ~2,9 M scores/s | 1× |
+| AVX2 | ~33,9 M scores/s | **×11,5** |
+| AVX-512 (un FMA 16-wide / groupe) | ~41,6 M scores/s | **×14,1** |
 
-Le facteur dépasse les 8× théoriques du SIMD `f32` car le chemin scalaire payait aussi une déquantification INT4 *branchy* que l'AVX2 fusionne. À traiter comme un ordre de grandeur sur banc partagé. Un **chemin NEON** (aarch64) existe également, **vérifié par cross-compilation** mais non chronométré ici (pas de matériel ARM sur le banc) ; **AVX-512** reste à écrire.
+Le facteur dépasse le 8×/16× « théorique » car le chemin scalaire payait aussi une déquantification INT4 *branchy* que le SIMD fusionne. AVX-512 n'ajoute que **~+23 %** sur AVX2 : le kernel est court (128 dims) et limité surtout par le dénibblage/chargement, pas par la largeur FMA. À traiter comme un ordre de grandeur sur banc partagé. Un **chemin NEON** (aarch64) existe aussi, **vérifié par cross-compilation** mais non chronométré ici (pas de matériel ARM).
 
 ### 7.5 Trafic mémoire & débit vs une référence bf16 (§6.2, au niveau kernel)
 
@@ -405,7 +406,7 @@ Le latent peut être encodé en **NF4** (codebook NormalFloat-4, 16 niveaux aux 
 
 SLHA v2 **propose** qu'en mariant la rigueur d'un système d'exploitation gérant sa mémoire au bit près (CCOS) avec des abstractions mathématiques appliquées aux limites physiques du silicium (SciRust), l'inférence locale puisse changer de paradigme : le cache KV cesserait d'être un fardeau monolithique pour devenir une structure fluide, résiliente et consciente de l'architecture qui l'héberge.
 
-**Cette spécification (v1) progresse vers la validation.** Le crate `scirust` est compilable et testé (§5.1), plusieurs bancs reproductibles existent, un chemin **AVX2** (×13, §7.4) accélère le kernel, et les résultats (§7) confirment la correction du mécanisme et la viabilité du Soft-Paging. Enseignement clé, **corrigé par la mesure** : le plafond de fidélité du *score coarse* tient à la **projection bas-rang**, pas à la quantification du latent — NF4 et même une référence INT8 n'y changent rien (§7.8), tandis qu'une projection *apprise* le lève nettement (§7.7) et que le résidu 1-bit fait le reste (sortie d'attention à cosinus 0,95–0,997, §7.6). Restent à faire : (1) l'extension SIMD à **AVX-512** (AVX2 et NEON déjà en place) ; (2) la validation **matérielle complète** du §6 (compteurs de cache via `perf`, perplexité d'un vrai modèle) — déjà amorcée au niveau kernel en §7.5 ; (3) l'**entraînement conjoint** des projections avec un vrai modèle (le §7.7 en établit le principe).
+**Cette spécification (v1) progresse vers la validation.** Le crate `scirust` est compilable et testé (§5.1), plusieurs bancs reproductibles existent, un chemin **AVX2** (×13, §7.4) accélère le kernel, et les résultats (§7) confirment la correction du mécanisme et la viabilité du Soft-Paging. Enseignement clé, **corrigé par la mesure** : le plafond de fidélité du *score coarse* tient à la **projection bas-rang**, pas à la quantification du latent — NF4 et même une référence INT8 n'y changent rien (§7.8), tandis qu'une projection *apprise* le lève nettement (§7.7) et que le résidu 1-bit fait le reste (sortie d'attention à cosinus 0,95–0,997, §7.6). Côté noyau, les chemins **AVX2, AVX-512 et NEON** sont en place (§7.4). Restent à faire : (1) la validation **matérielle réelle** du §6 (compteurs de cache via `perf`, perplexité d'un vrai modèle) — non faisable dans ce sandbox, amorcée au niveau kernel en §7.5 ; (2) l'**entraînement conjoint** des projections avec un vrai modèle (le §7.7 en établit le principe).
 
 ---
 

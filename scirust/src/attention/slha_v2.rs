@@ -152,9 +152,15 @@ impl SciRustSlhaTile {
         // The SIMD paths decode uniform INT4 only; NF4 tiles use the scalar path.
         #[cfg(target_arch = "x86_64")]
         {
-            if !self.is_nf4() && std::is_x86_feature_detected!("avx2") {
-                // SAFETY: guarded by runtime feature detection.
-                return unsafe { self.compute_score_avx2(q_coarse, q_sign) };
+            if !self.is_nf4() {
+                if std::is_x86_feature_detected!("avx512f") {
+                    // SAFETY: guarded by runtime feature detection.
+                    return unsafe { self.compute_score_avx512(q_coarse, q_sign) };
+                }
+                if std::is_x86_feature_detected!("avx2") {
+                    // SAFETY: guarded by runtime feature detection.
+                    return unsafe { self.compute_score_avx2(q_coarse, q_sign) };
+                }
             }
         }
         #[cfg(target_arch = "aarch64")]
@@ -201,10 +207,11 @@ impl SciRustSlhaTile {
     ///
     /// # Safety
     /// The `avx2` target feature must be available. The public
-    /// [`Self::compute_score`] dispatcher guarantees this via runtime detection.
+    /// [`Self::compute_score`] dispatcher guarantees this via runtime detection;
+    /// `pub` so benchmarks can target this path explicitly.
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
-    unsafe fn compute_score_avx2(
+    pub unsafe fn compute_score_avx2(
         &self,
         q_coarse: &[f32; D_C],
         q_sign: &[u64; RESIDUAL_WORDS],
@@ -246,6 +253,50 @@ impl SciRustSlhaTile {
         let mut tmp = [0.0f32; 8];
         _mm256_storeu_ps(tmp.as_mut_ptr(), acc);
         let coarse: f32 = tmp.iter().sum();
+
+        if self.is_warm() {
+            return coarse;
+        }
+        coarse + self.residual_term(q_sign)
+    }
+
+    /// AVX-512 path: one 16-wide FMA per group (16 latent dims).
+    ///
+    /// # Safety
+    /// The `avx512f` target feature must be available. The public
+    /// [`Self::compute_score`] dispatcher guarantees this via runtime detection;
+    /// `pub` so benchmarks can target this path explicitly.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f")]
+    pub unsafe fn compute_score_avx512(
+        &self,
+        q_coarse: &[f32; D_C],
+        q_sign: &[u64; RESIDUAL_WORDS],
+    ) -> f32 {
+        use std::arch::x86_64::*;
+
+        let global = self.scale;
+        let inv255 = 1.0f32 / 255.0;
+        let eight = _mm512_set1_ps(8.0);
+        let nibble_mask = _mm_set1_epi8(0x0F);
+        let mut acc = _mm512_setzero_ps();
+        let latent = self.latent_kv.as_ptr();
+        let q = q_coarse.as_ptr();
+
+        // One group (16 dims = 8 bytes) per 16-wide fused multiply-add.
+        for g in 0..N_GROUPS {
+            let base = g * GROUP_DIM;
+            let gs = _mm512_set1_ps(global * (self.group_scales[g] as f32 * inv255));
+            let packed = _mm_loadl_epi64(latent.add(g * 8) as *const __m128i);
+            let lo = _mm_and_si128(packed, nibble_mask);
+            let hi = _mm_and_si128(_mm_srli_epi16(packed, 4), nibble_mask);
+            let d16 = _mm_unpacklo_epi8(lo, hi); // 16 bytes = dims base..base+15
+            let n = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(d16));
+            let v = _mm512_mul_ps(gs, _mm512_sub_ps(n, eight));
+            let qv = _mm512_loadu_ps(q.add(base));
+            acc = _mm512_fmadd_ps(v, qv, acc);
+        }
+        let coarse = _mm512_reduce_add_ps(acc);
 
         if self.is_warm() {
             return coarse;
@@ -573,6 +624,30 @@ mod tests {
                 assert!(
                     (s - a).abs() <= 1e-3 * (1.0 + s.abs()),
                     "tile {i}: scalar {s} vs avx2 {a}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn avx512_path_matches_scalar() {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if !std::is_x86_feature_detected!("avx512f") {
+                eprintln!("avx512f unavailable — skipping equivalence check");
+                return;
+            }
+            use crate::scenario::{build_tile, generate, Projection};
+            let proj = Projection::new(9);
+            let (q, toks) = generate(123, 64, 0.4);
+            let q_sign = proj.sign_bits(&q);
+            for (i, t) in toks.iter().enumerate() {
+                let tile = build_tile(&proj, t, i as u32, i % 2 == 0);
+                let s = tile.compute_score_scalar(&q, &q_sign);
+                let a = unsafe { tile.compute_score_avx512(&q, &q_sign) };
+                assert!(
+                    (s - a).abs() <= 1e-3 * (1.0 + s.abs()),
+                    "tile {i}: scalar {s} vs avx512 {a}"
                 );
             }
         }

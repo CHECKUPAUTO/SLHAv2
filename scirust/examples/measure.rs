@@ -99,7 +99,7 @@ fn main() {
     }
     println!();
 
-    // --- 3) Throughput: scalar vs AVX2 dispatch ------------------------------
+    // --- 3) Throughput: scalar vs AVX2 vs AVX-512 ----------------------------
     {
         let (q, toks) = generate(1, 4096, 0.3);
         let q_sign = proj.sign_bits(&q);
@@ -111,7 +111,6 @@ fn main() {
         let iters = 200usize;
         let scores = (iters * tiles.len()) as f64;
 
-        // Forced scalar path.
         let mut sink = 0.0f32;
         let t0 = Instant::now();
         for _ in 0..iters {
@@ -121,28 +120,36 @@ fn main() {
         }
         let scal = scores / t0.elapsed().as_secs_f64() / 1e6;
 
-        // Dispatched path (AVX2 if available).
-        let mut sink2 = 0.0f32;
-        let t1 = Instant::now();
-        for _ in 0..iters {
-            for tile in &tiles {
-                sink2 += tile.compute_score(&q, &q_sign);
-            }
-        }
-        let disp = scores / t1.elapsed().as_secs_f64() / 1e6;
+        println!("3) Débit  (checksum {sink:.0})");
+        println!("   scalaire : {scal:>6.1} M scores/s   (1×)");
 
         #[cfg(target_arch = "x86_64")]
-        let avx2 = std::is_x86_feature_detected!("avx2");
-        #[cfg(not(target_arch = "x86_64"))]
-        let avx2 = false;
-
-        println!("3) Débit  (checksums {:.0} / {:.0})", sink, sink2);
-        println!("   scalaire            : {scal:>6.1} M scores/s");
-        println!(
-            "   dispatch (AVX2={:<5}) : {disp:>6.1} M scores/s   (×{:.2} vs scalaire)",
-            avx2,
-            disp / scal
-        );
+        {
+            if std::is_x86_feature_detected!("avx2") {
+                let mut s = 0.0f32;
+                let t = Instant::now();
+                for _ in 0..iters {
+                    for tile in &tiles {
+                        s += unsafe { tile.compute_score_avx2(&q, &q_sign) };
+                    }
+                }
+                std::hint::black_box(s);
+                let r = scores / t.elapsed().as_secs_f64() / 1e6;
+                println!("   AVX2     : {r:>6.1} M scores/s   (×{:.2})", r / scal);
+            }
+            if std::is_x86_feature_detected!("avx512f") {
+                let mut s = 0.0f32;
+                let t = Instant::now();
+                for _ in 0..iters {
+                    for tile in &tiles {
+                        s += unsafe { tile.compute_score_avx512(&q, &q_sign) };
+                    }
+                }
+                std::hint::black_box(s);
+                let r = scores / t.elapsed().as_secs_f64() / 1e6;
+                println!("   AVX-512  : {r:>6.1} M scores/s   (×{:.2})", r / scal);
+            }
+        }
     }
 
     println!("\n   D_K = {D_K}. Toutes les valeurs sont reproductibles (graines fixes).");
