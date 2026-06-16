@@ -5,7 +5,8 @@ latente bas-rang en **INT4** + un résidu de correction **1-bit** (sign-LSH),
 empaquetés dans une **tuile de 128 octets** alignée sur la ligne de cache.
 
 - **Spécification & résultats :** [`SLHAv2.md`](SLHAv2.md)
-- **Implémentation de référence** (Rust, **zéro dépendance**) : [`scirust/`](scirust/) — détails dans [`scirust/README.md`](scirust/README.md)
+- **Synthèse des findings (court) :** [`FINDINGS.md`](FINDINGS.md)
+- **Implémentation de référence** (Rust, lib **sans dépendance**) : [`scirust/`](scirust/) — détails dans [`scirust/README.md`](scirust/README.md)
 
 ## En bref
 
