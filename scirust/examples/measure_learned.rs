@@ -46,7 +46,9 @@ fn main() {
 
     println!("== SLHA v2 — mesure avec projection APPRISE (PCA) ==\n");
     println!("  d_model = {d}, latent D_C = 128, résidu d_s = 256 bits");
-    println!("  P = top-128 vecteurs propres de la covariance des clés (PCA), latent INT4 non whitené\n");
+    println!(
+        "  P = top-128 vecteurs propres de la covariance des clés (PCA), latent INT4 non whitené\n"
+    );
 
     println!(
         "  {:>6} {:>9} {:>6} | {:^17} | {:^17}",

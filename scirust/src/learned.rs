@@ -71,7 +71,11 @@ impl LearnedModel {
 
         let total: f64 = eigvals.iter().map(|&x| x.max(0.0)).sum();
         let kept: f64 = idx[..D_C].iter().map(|&i| eigvals[i].max(0.0)).sum();
-        let captured_energy = if total > 0.0 { (kept / total) as f32 } else { 1.0 };
+        let captured_energy = if total > 0.0 {
+            (kept / total) as f32
+        } else {
+            1.0
+        };
 
         // Floor the whitening scale so near-zero eigenvalues don't blow up
         // pure-noise components (cap the dynamic range at ~sqrt(1e3)).
@@ -93,7 +97,14 @@ impl LearnedModel {
         let mut z = vec![0.0f32; D_S * d];
         rng.fill_gaussian(&mut z);
 
-        LearnedModel { d, evec, scale, z, captured_energy, whiten }
+        LearnedModel {
+            d,
+            evec,
+            scale,
+            z,
+            captured_energy,
+            whiten,
+        }
     }
 
     #[inline]
@@ -315,7 +326,10 @@ mod tests {
         };
         let single = hot_sp(false);
         let grouped = hot_sp(true);
-        assert!(grouped + 0.02 >= single, "grouped {grouped} worse than single {single}");
+        assert!(
+            grouped + 0.02 >= single,
+            "grouped {grouped} worse than single {single}"
+        );
     }
 
     #[test]

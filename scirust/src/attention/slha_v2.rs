@@ -399,7 +399,10 @@ mod tests {
         let tile = tile_from(packed, scale, [255; N_GROUPS]);
         let dq = tile.dequant_latent();
         // At least one strictly-negative reconstructed value (zero-point works).
-        assert!(dq.iter().any(|&x| x < 0.0), "no negative values reconstructed");
+        assert!(
+            dq.iter().any(|&x| x < 0.0),
+            "no negative values reconstructed"
+        );
         for d in 0..D_C {
             assert!(
                 (dq[d] - v[d]).abs() <= scale + 1e-6,

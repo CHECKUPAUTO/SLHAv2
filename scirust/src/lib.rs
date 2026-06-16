@@ -11,10 +11,15 @@
 //! binary (popcount-based) term — see [`attention::slha_v2`] and eq. (2.3) of
 //! the spec.
 //!
-//! This crate is a **correctness-first reference**: the hot path is portable,
-//! `unsafe`-free scalar code with a safe, testable API. SIMD specialisation is
-//! left as future work (and is now *unblocked*, since the previous reference
-//! used `read_volatile`, which forbids auto-vectorisation).
+//! Correctness-first reference with a safe, testable API. The hot path has a
+//! portable scalar fallback plus runtime-dispatched **AVX2** (x86_64) and
+//! **NEON** (aarch64) kernels, each checked for equivalence against the scalar
+//! path. (The v1 listing used `read_volatile`, which forbids auto-vectorisation;
+//! that has been removed — see spec §5.1.)
+
+// These are numeric kernels: indexing parallel arrays and matvec rows by
+// position reads closer to the math than iterator-chain rewrites would.
+#![allow(clippy::needless_range_loop)]
 
 pub mod attention;
 pub mod learned;

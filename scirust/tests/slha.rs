@@ -23,13 +23,23 @@ fn hamming_identity_matches_sign_dot() {
             a[w] = rng.next_u64();
             b[w] = rng.next_u64();
         }
-        let hamming: u32 = (0..RESIDUAL_WORDS).map(|w| (a[w] ^ b[w]).count_ones()).sum();
+        let hamming: u32 = (0..RESIDUAL_WORDS)
+            .map(|w| (a[w] ^ b[w]).count_ones())
+            .sum();
         let formula = D_S as i32 - 2 * hamming as i32;
 
         let mut brute = 0i32;
         for s in 0..D_S {
-            let sa = if (a[s >> 6] >> (s & 63)) & 1 == 1 { -1 } else { 1 };
-            let sb = if (b[s >> 6] >> (s & 63)) & 1 == 1 { -1 } else { 1 };
+            let sa = if (a[s >> 6] >> (s & 63)) & 1 == 1 {
+                -1
+            } else {
+                1
+            };
+            let sb = if (b[s >> 6] >> (s & 63)) & 1 == 1 {
+                -1
+            } else {
+                1
+            };
             brute += sa * sb;
         }
         assert_eq!(formula, brute);
@@ -108,7 +118,9 @@ fn sign_lsh_residual_tracks_cosine() {
             e[i] += align * q[i];
         }
         let b = proj.sign_bits(&e);
-        let hamming: u32 = (0..RESIDUAL_WORDS).map(|w| (q_sign[w] ^ b[w]).count_ones()).sum();
+        let hamming: u32 = (0..RESIDUAL_WORDS)
+            .map(|w| (q_sign[w] ^ b[w]).count_ones())
+            .sum();
         est.push(D_S as f32 - 2.0 * hamming as f32);
         cos.push(dot(&q, &e) / norm(&e));
     }

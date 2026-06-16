@@ -119,7 +119,11 @@ pub fn generate(seed: u64, n: usize, rho: f32) -> ([f32; D_K], Vec<ContextToken>
         for i in 0..D_K {
             k_real[i] = k_coarse[i] + e[i];
         }
-        tokens.push(ContextToken { k_coarse, e, k_real });
+        tokens.push(ContextToken {
+            k_coarse,
+            e,
+            k_real,
+        });
     }
     (q, tokens)
 }

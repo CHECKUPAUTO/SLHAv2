@@ -68,7 +68,12 @@ fn main() {
 
     let mut q = [0.0f32; D_C];
     rng.fill_gaussian(&mut q);
-    let q_sign = [rng.next_u64(), rng.next_u64(), rng.next_u64(), rng.next_u64()];
+    let q_sign = [
+        rng.next_u64(),
+        rng.next_u64(),
+        rng.next_u64(),
+        rng.next_u64(),
+    ];
 
     println!("== SLHA (128 o/token) vs référence bf16 (256 o/token) ==\n");
     println!(
