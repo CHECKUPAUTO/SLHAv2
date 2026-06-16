@@ -14,8 +14,8 @@ Hybrid Attention) décrit dans [`../SLHAv2.md`](../SLHAv2.md).
 ## Build / test / mesure
 
 ```sh
-cargo test                                       # 15 tests : Hamming, layout 128 o, zero-point INT4, WARM,
-                                                 # sign-LSH, Jacobi, PCA, INT4 groupé (MX), sortie d'attention,
+cargo test                                       # 16 tests : Hamming, layout 128 o, zero-point INT4, WARM,
+                                                 # sign-LSH, Jacobi, PCA, INT4 groupé (MX), NF4, sortie d'attention,
                                                  # SGD task-aware, AVX2≡scalaire (+ NEON sur ARM)
 cargo run --example measure --release            # rho fixé : fidélité, HOT vs WARM, débit scalaire vs AVX2
 cargo run --example measure_learned --release    # base apprise par PCA + INT4 groupé (MX)
@@ -45,7 +45,7 @@ faible énergie résiduelle, gains du résidu 1-bit modérés à `d_s = 256`.
 
 | Fichier | Rôle |
 |---|---|
-| `attention/slha_v2.rs` | Tuile `SciRustSlhaTile` (128 o), kernel `compute_score` (scalaire + AVX2), quantification INT4 par groupe (MX) |
+| `attention/slha_v2.rs` | Tuile `SciRustSlhaTile` (128 o), kernel `compute_score` (scalaire + AVX2), codecs latents INT4 (MX) / NF4 |
 | `linalg.rs` | Décomposition propre symétrique (Jacobi) pour la PCA |
 | `learned.rs` | Projection bas-rang : PCA + **SGD task-aware** (`train_projection`) + génération de clés |
 | `scenario.rs` | Projection sign-LSH, génération de contexte à énergie résiduelle `rho` contrôlable |

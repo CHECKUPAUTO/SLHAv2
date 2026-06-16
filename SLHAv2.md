@@ -322,10 +322,11 @@ Pour lever la réserve « base idéale », `measure_learned` **apprend** la proj
 
 **Lecture :**
 
-- **Le bas-rang n'est plus le goulot.** La PCA capte 97–99,7 % de l'énergie à rang 128 ; pourtant le Spearman HOT plafonne à 0,79–0,90. Le facteur limitant devient la **quantification INT4 du latent**, pas la projection.
-- **HOT > WARM partout**, parfois nettement (decay 0,93 : **+0,28** de Spearman). Le résidu 1-bit récupère une part de ce que l'INT4 dégrade.
-- **Quantification par groupe (MX) : forte baisse de l'erreur de reconstruction, gain end-to-end marginal.** Le groupage divise par **>2×** l'erreur de reconstruction du latent sur un spectre étagé (prouvé par test), mais ne déplace quasiment pas le ranking ici (decay 0,93 : HOT 0,879 → 0,884 ; top-16 inchangé). Raison : le score est dominé par les composantes de **forte** variance, que l'échelle unique représente déjà bien. **Le vrai plafond est la résolution 4 bits** sur ces composantes — pas la plage dynamique inter-groupes. Le lever demande plus de bits (INT8 / NF4) ou un `d_s` plus grand, pas un groupage plus fin.
-- **Résultat négatif assumé : whitener le latent DÉGRADE** (0,859 → 0,750 de HOT Spearman à decay 0,95). L'échelle INT4 vaut mieux *non* whitenée — elle alloue spontanément sa résolution aux composantes de forte variance. (Neutre sur le score ; c'est la quantification qu'il pénalise.)
+- **HOT plafonne à 0,79–0,90**, WARM (coarse seul) à ~0,60–0,87, malgré 97–99,7 % d'énergie captée : l'énergie de reconstruction n'est pas la fidélité de *score*.
+- **HOT > WARM partout**, parfois nettement (decay 0,93 : **+0,28** de Spearman) : le résidu 1-bit récupère une grande part de ce que le coarse rate.
+- **Quantification par groupe (MX) : forte baisse de l'erreur de reconstruction (>2×, prouvé par test), gain end-to-end marginal** (decay 0,93 : HOT 0,879 → 0,884). Le score est dominé par les composantes de forte variance, déjà bien représentées par l'échelle unique.
+- **Résultat négatif assumé : whitener le latent DÉGRADE** (0,859 → 0,750 à decay 0,95) — l'échelle INT4 alloue mieux sa résolution non whitenée.
+- **Attention à l'interprétation.** On pourrait croire ce plafond dû à l'INT4 du latent ; le **§7.8 le réfute** (INT8 n'améliore pas le WARM). Le vrai facteur limitant du coarse est la **projection bas-rang**, pas la quantification.
 
 ### 7.4 Débit (scalaire vs AVX2)
 
@@ -383,7 +384,20 @@ La PCA choisit les directions de plus forte variance des **clés** — elle igno
 
 **Réponse à la question ouverte : oui, l'apprentissage bat nettement la PCA** (WARM 0,86 vs 0,16) lorsque Q et K diffèrent — la projection task-aware réalloue la capacité bas-rang vers les directions qui comptent pour le score. **Réserves :** données synthétiques à décalage Q/K délibéré ; quand Q et K partagent la même statistique, la PCA est déjà (quasi-)optimale pour le score (rien à gagner) ; et c'est une preuve de concept SGD sur `P` seule, pas un entraînement conjoint avec un vrai modèle.
 
-**Conclusion partielle.** Le mécanisme est **mathématiquement correct** (tests, dont les équivalences scalaire/AVX2) et **directionnellement validé** : HOT ≥ WARM, Soft-Paging quasi sans perte à faible `rho`, SIMD ×13, **~2,5× de tokens/s vs bf16** (§7.5), **sortie d'attention à cosinus 0,95–0,997** (§7.6), et une **projection apprise qui bat la PCA** sous décalage Q/K (§7.7). Bémols : (1) le goulot de fidélité du *score* devient l'**INT4 du latent** ; (2) le résidu 1-bit reste **modéré** à `d_s = 256`. Pistes : INT8 / NF4, `d_s` plus grand, et entraînement conjoint des projections avec un vrai modèle.
+### 7.8 Codec latent NF4 et référence INT8 : la quantification n'est pas le goulot
+
+Le latent peut être encodé en **NF4** (codebook NormalFloat-4, 16 niveaux aux quantiles d'une gaussienne) au lieu d'INT4 uniforme — **même budget 4 bits, même tuile 128 o**. On ajoute une **référence INT8** (coarse seul, tuile hypothétique 192 o) pour isoler l'effet de la largeur de bits.
+
+| Codec latent (decay 0,93) | HOT Spearman | WARM Spearman |
+|---|---|---|
+| INT4 uniforme (1 échelle) | 0,879 | 0,603 |
+| INT4 groupé (MX) | 0,884 | 0,609 |
+| NF4 groupé | 0,885 | 0,610 |
+| **INT8** (réf, 2× octets) | — | **0,606** |
+
+**Constat — et correction du §7.3 :** NF4 réduit l'erreur de reconstruction (test `nf4_beats_uniform_int4_on_gaussian_latent`) mais le gain end-to-end est **nul à marginal** (0,884 → 0,885). Surtout, **INT8 ne fait pas mieux qu'INT4 au WARM (~0,61)** : doubler les bits ne lève pas le plafond du terme coarse. **Le facteur limitant n'est donc PAS la quantification du latent, mais la projection bas-rang elle-même** (la part du score que la PCA laisse au résidu). Cela recadre les leviers réels : **(a)** une meilleure projection (§7.7 : apprise, WARM 0,16 → 0,86) et **(b)** le résidu 1-bit (HOT). NF4 reste utile (meilleure reconstruction, sans coût de tuile), mais n'est pas le levier de fidélité de score.
+
+**Conclusion partielle.** Le mécanisme est **mathématiquement correct** (tests, dont les équivalences scalaire/AVX2) et **directionnellement validé** : HOT ≥ WARM, Soft-Paging quasi sans perte à faible `rho`, SIMD ×13, **~2,5× de tokens/s vs bf16** (§7.5), **sortie d'attention à cosinus 0,95–0,997** (§7.6), et une **projection apprise qui bat la PCA** sous décalage Q/K (§7.7). Le §7.8 corrige une idée reçue : le plafond du *score coarse* tient à la **projection bas-rang**, non à la quantification (NF4 et même INT8 n'y changent rien). Leviers réels : **meilleure projection** et **résidu 1-bit** ; pistes restantes : `d_s` plus grand et entraînement conjoint des projections avec un vrai modèle.
 
 ---
 
@@ -391,7 +405,7 @@ La PCA choisit les directions de plus forte variance des **clés** — elle igno
 
 SLHA v2 **propose** qu'en mariant la rigueur d'un système d'exploitation gérant sa mémoire au bit près (CCOS) avec des abstractions mathématiques appliquées aux limites physiques du silicium (SciRust), l'inférence locale puisse changer de paradigme : le cache KV cesserait d'être un fardeau monolithique pour devenir une structure fluide, résiliente et consciente de l'architecture qui l'héberge.
 
-**Cette spécification (v1) progresse vers la validation.** Le crate `scirust` est compilable et testé (§5.1), deux bancs reproductibles existent, un chemin **AVX2** (×13, §7.4) accélère le kernel, et les résultats (§7) confirment la correction du mécanisme et la viabilité du Soft-Paging. Le point dur révélé par la mesure : avec une base bas-rang *apprise*, le goulot de fidélité devient l'**INT4 du latent** — et le groupage MX (déjà en place) ne le lève pas, car le plafond est la résolution 4 bits (§7.3). Restent à faire : (1) une **résolution latente plus large** (INT8 / NF4) et l'extension SIMD à **AVX-512** (AVX2 et NEON déjà en place) ; (2) la validation **matérielle complète** du §6 (compteurs de cache via `perf`, perplexité d'un vrai modèle) — déjà amorcée au niveau kernel en §7.5 ; (3) l'**entraînement conjoint** des projections avec un vrai modèle — le §7.7 en établit le principe (une projection apprise sur le score bat la PCA).
+**Cette spécification (v1) progresse vers la validation.** Le crate `scirust` est compilable et testé (§5.1), plusieurs bancs reproductibles existent, un chemin **AVX2** (×13, §7.4) accélère le kernel, et les résultats (§7) confirment la correction du mécanisme et la viabilité du Soft-Paging. Enseignement clé, **corrigé par la mesure** : le plafond de fidélité du *score coarse* tient à la **projection bas-rang**, pas à la quantification du latent — NF4 et même une référence INT8 n'y changent rien (§7.8), tandis qu'une projection *apprise* le lève nettement (§7.7) et que le résidu 1-bit fait le reste (sortie d'attention à cosinus 0,95–0,997, §7.6). Restent à faire : (1) l'extension SIMD à **AVX-512** (AVX2 et NEON déjà en place) ; (2) la validation **matérielle complète** du §6 (compteurs de cache via `perf`, perplexité d'un vrai modèle) — déjà amorcée au niveau kernel en §7.5 ; (3) l'**entraînement conjoint** des projections avec un vrai modèle (le §7.7 en établit le principe).
 
 ---
 

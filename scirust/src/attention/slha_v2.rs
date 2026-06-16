@@ -39,6 +39,26 @@ pub const FLAG_HOT: u16 = 0;
 /// Elastic paging: residual bitmap considered freed; score uses the latent
 /// base only (`dynamic_lambda` is bypassed). ~30% footprint drop, no I/O.
 pub const FLAG_WARM: u16 = 1 << 0;
+/// Latent uses the NF4 (NormalFloat-4) codebook instead of uniform INT4.
+pub const FLAG_NF4: u16 = 1 << 1;
+
+/// NF4 codebook: 16 levels at the quantiles of `N(0, 1)`, normalised to
+/// `[-1, 1]` (denser near 0, where most latent mass lies). Ascending order.
+pub const NF4_CODEBOOK: [f32; 16] = [
+    -1.0, -0.7075, -0.5421, -0.4165, -0.3108, -0.2158, -0.1272, -0.0421, 0.0421, 0.1272, 0.2158,
+    0.3108, 0.4165, 0.5421, 0.7075, 1.0,
+];
+
+/// Which 4-bit codec a tile's latent uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LatentCodec {
+    /// Uniform INT4, single per-tile scale.
+    Int4Single,
+    /// Uniform INT4, per-group (MX) scales.
+    Int4Grouped,
+    /// NF4 (normal-float) codebook, per-group scales.
+    Nf4,
+}
 
 /// A single SLHA v2 context tile.
 ///
@@ -84,6 +104,12 @@ impl SciRustSlhaTile {
         self.flags & FLAG_WARM != 0
     }
 
+    /// True if the latent uses the NF4 codebook (else uniform INT4).
+    #[inline]
+    pub fn is_nf4(&self) -> bool {
+        self.flags & FLAG_NF4 != 0
+    }
+
     /// Effective dequant scale for dimension `d`: global scale × the dim's
     /// per-group micro-scale.
     #[inline]
@@ -91,13 +117,18 @@ impl SciRustSlhaTile {
         self.scale * (self.group_scales[d / GROUP_DIM] as f32 / 255.0)
     }
 
-    /// Dequantise one latent dimension `d` with the signed zero-point and its
-    /// per-group scale.
+    /// Dequantise one latent dimension `d` with its per-group scale, decoding
+    /// the nibble via uniform INT4 (signed zero-point) or the NF4 codebook.
     #[inline]
     pub fn dequant_at(&self, d: usize) -> f32 {
         let byte = self.latent_kv[d >> 1];
-        let nib = if d & 1 == 0 { byte & 0x0F } else { byte >> 4 };
-        ((nib as i32) - 8) as f32 * self.group_scale(d)
+        let nib = (if d & 1 == 0 { byte & 0x0F } else { byte >> 4 }) as usize;
+        let level = if self.is_nf4() {
+            NF4_CODEBOOK[nib]
+        } else {
+            (nib as i32 - 8) as f32
+        };
+        level * self.group_scale(d)
     }
 
     /// Materialise the full dequantised latent vector (mostly for tests).
@@ -118,9 +149,10 @@ impl SciRustSlhaTile {
     /// scalar path. Both yield the same result up to float reassociation.
     #[inline]
     pub fn compute_score(&self, q_coarse: &[f32; D_C], q_sign: &[u64; RESIDUAL_WORDS]) -> f32 {
+        // The SIMD paths decode uniform INT4 only; NF4 tiles use the scalar path.
         #[cfg(target_arch = "x86_64")]
         {
-            if std::is_x86_feature_detected!("avx2") {
+            if !self.is_nf4() && std::is_x86_feature_detected!("avx2") {
                 // SAFETY: guarded by runtime feature detection.
                 return unsafe { self.compute_score_avx2(q_coarse, q_sign) };
             }
@@ -128,13 +160,12 @@ impl SciRustSlhaTile {
         #[cfg(target_arch = "aarch64")]
         {
             // NEON is baseline on aarch64 — no runtime detection needed.
-            // SAFETY: NEON is always available on this target.
-            return unsafe { self.compute_score_neon(q_coarse, q_sign) };
+            if !self.is_nf4() {
+                // SAFETY: NEON is always available on this target.
+                return unsafe { self.compute_score_neon(q_coarse, q_sign) };
+            }
         }
-        #[allow(unreachable_code)] // unreachable on aarch64 (returns above)
-        {
-            self.compute_score_scalar(q_coarse, q_sign)
-        }
+        self.compute_score_scalar(q_coarse, q_sign)
     }
 
     /// Binary 1-bit correction: λ · (d_s − 2·popcount(q_sign ^ B)).
@@ -343,6 +374,60 @@ pub fn quantize_latent_grouped(v: &[f32; D_C]) -> ([u8; LATENT_BYTES], f32, [u8;
     (out, global, gs)
 }
 
+/// Index of the nearest NF4 codebook level to `t` (expects `t ∈ [-1, 1]`).
+#[inline]
+fn nf4_nearest(t: f32) -> u8 {
+    let mut best = 0usize;
+    let mut best_d = f32::INFINITY;
+    for (i, &c) in NF4_CODEBOOK.iter().enumerate() {
+        let dd = (t - c).abs();
+        if dd < best_d {
+            best_d = dd;
+            best = i;
+        }
+    }
+    best as u8
+}
+
+/// Per-group NF4 quantisation. Each group is scaled by its absmax (the NF4
+/// codebook spans `[-1, 1]`); the scale is stored relative to the global one,
+/// exactly like [`quantize_latent_grouped`]. Returns `(nibbles, global, gs)`.
+pub fn quantize_latent_nf4(v: &[f32; D_C]) -> ([u8; LATENT_BYTES], f32, [u8; N_GROUPS]) {
+    let mut group_scale = [0.0f32; N_GROUPS];
+    for g in 0..N_GROUPS {
+        let mut mx = 0.0f32;
+        for d in g * GROUP_DIM..(g + 1) * GROUP_DIM {
+            mx = mx.max(v[d].abs());
+        }
+        group_scale[g] = mx; // absmax (codebook max == 1.0)
+    }
+    let global = group_scale.iter().copied().fold(0.0f32, f32::max);
+    let global = if global > 0.0 { global } else { 1.0 };
+
+    let mut gs = [0u8; N_GROUPS];
+    for g in 0..N_GROUPS {
+        let r = (group_scale[g] / global * 255.0).round();
+        gs[g] = r.clamp(1.0, 255.0) as u8;
+    }
+
+    let mut out = [0u8; LATENT_BYTES];
+    for d in 0..D_C {
+        let eff = global * (gs[d / GROUP_DIM] as f32 / 255.0);
+        let t = if eff > 0.0 {
+            (v[d] / eff).clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        let nib = nf4_nearest(t);
+        if d & 1 == 0 {
+            out[d >> 1] = (out[d >> 1] & 0xF0) | nib;
+        } else {
+            out[d >> 1] = (out[d >> 1] & 0x0F) | (nib << 4);
+        }
+    }
+    (out, global, gs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,6 +522,34 @@ mod tests {
         assert!(
             e_grouped < e_single * 0.5,
             "grouped err {e_grouped} not clearly < single err {e_single}"
+        );
+    }
+
+    #[test]
+    fn nf4_beats_uniform_int4_on_gaussian_latent() {
+        // NF4's normal-quantile codebook should reconstruct Gaussian latent
+        // values more accurately than uniform INT4 at the same 4-bit budget.
+        let mut v = [0.0f32; D_C];
+        let mut rng = crate::rng::Rng::new(8);
+        for x in v.iter_mut() {
+            *x = rng.next_gaussian();
+        }
+        let sq_err = |t: &SciRustSlhaTile| -> f32 {
+            let dq = t.dequant_latent();
+            (0..D_C).map(|d| (dq[d] - v[d]).powi(2)).sum()
+        };
+
+        let (p1, s1, g1) = quantize_latent_grouped(&v);
+        let e_uniform = sq_err(&tile_from(p1, s1, g1)); // FLAG_HOT -> uniform
+
+        let (p2, s2, g2) = quantize_latent_nf4(&v);
+        let mut nf4 = tile_from(p2, s2, g2);
+        nf4.flags |= FLAG_NF4;
+        let e_nf4 = sq_err(&nf4);
+
+        assert!(
+            e_nf4 < e_uniform,
+            "NF4 err {e_nf4} not < uniform {e_uniform}"
         );
     }
 

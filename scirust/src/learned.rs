@@ -21,8 +21,8 @@
 //! *unchanged* fixed-size tile and kernel.
 
 use crate::attention::slha_v2::{
-    quantize_latent, quantize_latent_grouped, SciRustSlhaTile, D_C, D_S, FLAG_WARM, N_GROUPS,
-    RESIDUAL_WORDS,
+    quantize_latent, quantize_latent_grouped, quantize_latent_nf4, LatentCodec, SciRustSlhaTile,
+    D_C, D_S, FLAG_NF4, FLAG_WARM, N_GROUPS, RESIDUAL_WORDS,
 };
 use crate::linalg::jacobi_eigh;
 use crate::rng::Rng;
@@ -191,16 +191,30 @@ impl LearnedModel {
     }
 
     /// Encode a key into a tile. The residual `E = key - reconstruct(latent)` is
-    /// computed from the *un-quantised* latent; the INT4 error is a separate,
-    /// smaller approximation folded into the coarse term. `grouped` selects
-    /// per-group micro-scaling (recommended) vs a single global INT4 scale.
-    pub fn encode_with(&self, key: &[f32], pos: u32, warm: bool, grouped: bool) -> SciRustSlhaTile {
+    /// computed from the *un-quantised* latent; the quantisation error is a
+    /// separate, smaller approximation folded into the coarse term. `codec`
+    /// selects the latent quantiser.
+    pub fn encode_with(
+        &self,
+        key: &[f32],
+        pos: u32,
+        warm: bool,
+        codec: LatentCodec,
+    ) -> SciRustSlhaTile {
         let h = self.latent(key);
-        let (latent, scale, group_scales) = if grouped {
-            quantize_latent_grouped(&h)
-        } else {
-            let (l, s) = quantize_latent(&h);
-            (l, s, [255u8; N_GROUPS])
+        let (latent, scale, group_scales, nf4) = match codec {
+            LatentCodec::Int4Single => {
+                let (l, s) = quantize_latent(&h);
+                (l, s, [255u8; N_GROUPS], false)
+            }
+            LatentCodec::Int4Grouped => {
+                let (l, s, gs) = quantize_latent_grouped(&h);
+                (l, s, gs, false)
+            }
+            LatentCodec::Nf4 => {
+                let (l, s, gs) = quantize_latent_nf4(&h);
+                (l, s, gs, true)
+            }
         };
         let recon = self.reconstruct(&h);
         let mut e = vec![0.0f32; self.d];
@@ -210,6 +224,10 @@ impl LearnedModel {
         let bitmap = self.sign_bits(&e);
         let sigma_e = (e.iter().map(|x| x * x).sum::<f32>() / self.d as f32).sqrt();
         let lambda = sigma_e * (std::f32::consts::PI / (2.0 * D_S as f32)).sqrt();
+        let mut flags = if warm { FLAG_WARM } else { 0 };
+        if nf4 {
+            flags |= FLAG_NF4;
+        }
         SciRustSlhaTile {
             latent_kv: latent,
             residual_bitmap: bitmap,
@@ -219,14 +237,14 @@ impl LearnedModel {
             token_id: pos,
             position: pos,
             head_id: 0,
-            flags: if warm { FLAG_WARM } else { 0 },
+            flags,
             group_scales,
         }
     }
 
     /// Encode a key into a tile (per-group micro-scaled INT4 latent).
     pub fn encode(&self, key: &[f32], pos: u32, warm: bool) -> SciRustSlhaTile {
-        self.encode_with(key, pos, warm, true)
+        self.encode_with(key, pos, warm, LatentCodec::Int4Grouped)
     }
 }
 
@@ -355,6 +373,7 @@ pub fn train_projection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::attention::slha_v2::LatentCodec;
     use crate::metrics::{dot, spearman};
 
     fn run(decay: f32, whiten: bool) -> (f32, f32, f32) {
@@ -423,21 +442,21 @@ mod tests {
         let q_coarse = model.query_coarse(q);
         let q_sign = model.sign_bits(q);
 
-        let hot_sp = |grouped: bool| {
+        let hot_sp = |codec: LatentCodec| {
             let mut st = Vec::new();
             let mut sh = Vec::new();
             for (i, key) in eval.iter().enumerate() {
                 st.push(dot(q, key));
                 sh.push(
                     model
-                        .encode_with(key, i as u32, false, grouped)
+                        .encode_with(key, i as u32, false, codec)
                         .compute_score(&q_coarse, &q_sign),
                 );
             }
             spearman(&sh, &st)
         };
-        let single = hot_sp(false);
-        let grouped = hot_sp(true);
+        let single = hot_sp(LatentCodec::Int4Single);
+        let grouped = hot_sp(LatentCodec::Int4Grouped);
         assert!(
             grouped + 0.02 >= single,
             "grouped {grouped} worse than single {single}"
