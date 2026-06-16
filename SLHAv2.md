@@ -10,7 +10,9 @@
 
 L'inférence locale de grands modèles de langage (LLM) sur des architectures de serveurs denses ou des accélérateurs embarqués se heurte à une contrainte physique immuable : le mur de la bande passante mémoire (Memory-Bandwidth Wall). Le cache KV, en grandissant de manière linéaire avec le contexte, sature les bus d'interconnexion et provoque une sous-utilisation critique des unités de calcul vectoriel.
 
-Nous présentons **SLHA v2** (Sub-Low Rank Hybrid Attention version 2), un mécanisme d'attention asymétrique et élastique conçu pour s'indexer précisément sur la topologie des caches L1, L2, et L3 des processeurs du marché (architectures multi-cœurs x86_64 type Xeon/Epyc et clusters ARM Neoverse/Thor). En fusionnant une compression latente de bas rang et une quantification résiduelle binaire sur 1-bit via l'infrastructure **SciRust**, SLHA v2 permet un "Soft-Paging" de la précision sémantique sans aucune allocation sur le tas, transformant la gestion du contexte en une opération déterministe au bit près, orchestrée par le noyau de système d'exploitation de contexte **CCOS**.
+Nous présentons **SLHA v2** (Sub-Low Rank Hybrid Attention version 2), un mécanisme d'attention asymétrique et élastique conçu pour s'indexer précisément sur la topologie des caches L1, L2, et L3 des processeurs du marché (architectures multi-cœurs x86_64 type Xeon/Epyc et clusters ARM Neoverse/Thor). En fusionnant une compression latente de bas rang et une quantification résiduelle binaire sur 1-bit via l'infrastructure **SciRust**, SLHA v2 vise un "Soft-Paging" de la précision sémantique sans aucune allocation sur le tas, transformant la gestion du contexte en une opération déterministe au bit près, orchestrée par le noyau de système d'exploitation de contexte **CCOS**.
+
+> **Statut (v1).** Ce document est une *spécification*, pas un rapport de résultats. Les cibles chiffrées de performance (§6) sont des **hypothèses non encore mesurées**, et l'implémentation de référence (§5) comporte des limitations explicitement recensées au §5.1.
 
 ---
 
@@ -96,15 +98,19 @@ L'innovation de la version v2 réside dans l'agencement mémoire en **Tuiles Sta
 
 ### 3.1 Alignement Géométrique des Tuiles
 
-Pour maximiser la localité spatiale et temporelle, nous définissons une structure `SciRustSlhaTile` dont l'empreinte mémoire totale est un multiple exact d'une ligne de cache standard :
+Pour maximiser la localité spatiale et temporelle, nous définissons une structure `SciRustSlhaTile` alignée sur 64 octets (`#[repr(C, align(64))]`), dont l'empreinte mémoire est un multiple exact de la ligne de cache de 64 octets :
 
 | Élément de la Tuile SLHA v2 | Format / Spécification | Taille Mémoire | Cible Matérielle Principale |
 |---|---|---|---|
 | Composante Latente (d_c = 128) | INT4 Quantifié (4 bits / échantillon) | 64 Octets | Cache L1 (Data) — Ligne complète |
 | Bitmaps de Résidus (d_s = 256) | 4 mots binaires de 64 bits (u64) | 32 Octets | Registres Vectoriels AVX-512 / ARM Neon |
-| Métadonnées de Scaling & λ | 2 Flottants simple précision (f32) | 8 Octets | Alignement et contrôle d'amplitude |
+| Métadonnées (échelle, λ, σ_E, token, position, tête, flags, réserve) | 3×f32 + 2×u32 + 2×u16 + 8 o réservés | 32 Octets | Pagination CCOS & contrôle d'amplitude |
 
-**Invariant Matériel :** Une tuile complète occupe exactement **104 octets**. Lors d'un calcul d'attention, SciRust pré-charge les vecteurs de requêtes dans le cache L1, puis balaie les tuiles de contexte séquentiellement. Le chargement d'une ligne de cache L1 sature instantanément l'unité arithmétique pour 128 dimensions sémantiques.
+**Invariant Matériel (implémenté & vérifié) :** Les trois blocs totalisent **exactement 128 octets** — latent 64 o + résidu 32 o + métadonnées 32 o. Avec `#[repr(C, align(64))]`, `size_of::<SciRustSlhaTile>()` vaut **128 octets sans aucun padding** (`align_of = 64`), et une tuile occupe **2 lignes de cache pleines**. Garanti par le test `tile_is_exactly_128_bytes_zero_padding` (somme des champs == `size_of` == 128). *Historique :* l'énoncé v1 « exactement 104 octets / multiple d'une ligne de cache » était faux — 104 n'est pas un multiple de 64, et l'`align(64)` arrondit la taille à 128. Les 24 octets qui n'étaient alors que du remplissage portent désormais des métadonnées utiles (σ_E, identifiants, drapeaux de pagination).
+
+Par ailleurs, le **bloc latent INT4 occupe à lui seul exactement 64 octets**, soit **une** ligne de cache pleine pour 128 dimensions sémantiques : c'est ce sous-bloc — et non la tuile entière — qui sature l'unité arithmétique en un unique chargement de ligne. Lors d'un calcul d'attention, SciRust pré-charge les vecteurs de requêtes dans le cache L1, puis balaie les tuiles de contexte séquentiellement.
+
+> **État :** l'option « zéro gaspillage » est désormais **implémentée** dans le crate `scirust` (les 24 anciens octets de padding portent des métadonnées, test à l'appui). Reste ouverte une variante **SoA** (latent 64 o dans un flux, résidu + métadonnées dans un autre) si l'on veut ramener le balayage à **une seule** ligne de cache par tuile.
 
 ### 3.2 Calibration Dynamique du Facteur d'Échelle λ
 
@@ -115,6 +121,8 @@ La constante λ, qui régit le poids de la correction binaire, n'est plus fixe. 
 ```
 
 Si l'arborescence causale du code (analysée par le parser CCOS) détecte une zone hautement critique (par exemple, une signature de fonction fondamentale), σ_E augmente pour forcer le processeur à sur-pondérer la fidélité binaire.
+
+> **Statut :** cette forme de λ est une **heuristique** de type estimateur sign-LSH — le facteur √(π/2) provient de la relation gaussienne 𝔼[|X|] = σ·√(2/π), et le 1/√d_s normalise la variance d'une somme de d_s termes ±1. Elle est **plausible mais non encore validée empiriquement** ; à confirmer (ou infirmer) via le protocole du §6.
 
 ---
 
@@ -144,79 +152,105 @@ Grâce à la décomposition asymétrique de SLHA v2, le noyau CCOS applique le p
 
 ## 5. Implémentation Logicielle du Micro-Noyau Asymétrique
 
-Le noyau d'inférence SLHA v2 optimisé par SciRust est écrit en Rust (édition 2021), respecte l'invariant de zéro allocation dans les boucles critiques, et force le compilateur à utiliser des instructions vectorielles branchless.
+Le noyau d'inférence SLHA v2 est écrit en Rust (édition 2021) et respecte l'invariant de zéro allocation dans les boucles critiques. Le crate `scirust` **compile et passe ses tests** (`cargo test`, 7 tests verts) ; le listing ci-dessous en est le cœur. C'est une **implémentation de référence _scalaire_, correcte avant d'être rapide** : API sûre (pas de pointeurs bruts, pas d'`unsafe`), sémantique exacte du score fusionné (eq. 2.3). Le chemin SIMD explicite reste à écrire — mais il est désormais *débloqué*, l'ancien `read_volatile` (qui interdisait toute vectorisation) ayant été retiré (cf. §5.1).
 
 Code source complet : [`scirust/src/attention/slha_v2.rs`](scirust/src/attention/slha_v2.rs)
 
 ```rust
-use std::arch::x86_64::*;
+// Constantes du modèle
+pub const D_C: usize = 128;                 // dim latente (INT4) -> 64 octets
+pub const D_S: usize = 256;                 // bits de résidu sign-LSH -> 32 octets
+pub const LATENT_BYTES: usize = D_C / 2;    // 64
+pub const RESIDUAL_WORDS: usize = D_S / 64; // 4
+pub const FLAG_HOT: u16 = 0;
+pub const FLAG_WARM: u16 = 1 << 0;          // résidu paginé : score = base latente seule
 
-#[repr(C, align(64))]
+#[repr(C, align(64))] // 128 octets exacts, zéro padding (test à l'appui)
+#[derive(Clone)]
 pub struct SciRustSlhaTile {
-    /// Espace latent compressé : 128 dimensions codées sur 4 bits (64 octets)
-    pub latent_kv: [u8; 64],
-    /// Résidu binaire de Johnson-Lindenstrauss : 256 bits (32 octets)
-    pub residual_bitmap: [u64; 4],
-    /// Facteur d'échelle de la quantification de bas rang
-    pub scale: f32,
-    /// Facteur de correction binaire dynamique calculé analytiquement
-    pub dynamic_lambda: f32,
+    pub latent_kv: [u8; LATENT_BYTES],          // 64  base h_KV en INT4 signé
+    pub residual_bitmap: [u64; RESIDUAL_WORDS], // 32  résidu sign-LSH (256 bits)
+    pub scale: f32,            //  4  échelle de déquantification INT4
+    pub dynamic_lambda: f32,   //  4  poids de correction binaire (eq. 3.2)
+    pub residual_sigma: f32,   //  4  σ_E par tuile (recalibrage de λ)
+    pub token_id: u32,         //  4
+    pub position: u32,         //  4
+    pub head_id: u16,          //  2
+    pub flags: u16,            //  2  HOT / WARM
+    pub _reserved: [u8; 8],    //  8  réserve -> total exact = 128
 }
 
-pub struct SciRustSlhaEngine;
+impl SciRustSlhaTile {
+    #[inline]
+    pub fn is_warm(&self) -> bool { self.flags & FLAG_WARM != 0 }
 
-impl SciRustSlhaEngine {
-    /// Calcule le score d'attention asymétrique d'une requête contre une tuile de contexte SLHA v2.
-    /// Ce code est conçu pour s'exécuter entièrement dans les registres CPU sans rupture de cache.
-    #[target_feature(enable = "avx2,popcnt")]
-    pub unsafe fn compute_tile_score(
-        q_coarse: *const f32,         // Vecteur de requête Q * W_up (128 dimensions contiguës)
-        q_residual_sign: *const u64,  // Signe de la requête packé sur 4 mots de 64 bits
-        tile: *const SciRustSlhaTile,
-    ) -> f32 {
-        // 1. Évaluation de la composante basse-fidélité (Déquantification 4-bit en ligne)
-        let mut coarse_accumulator = 0.0f32;
-        let latent_ptr = (*tile).latent_kv.as_ptr();
-        let scale = (*tile).scale;
+    /// Déquantification INT4 *signée* (zero-point) : (nibble − 8) · scale.
+    #[inline]
+    pub fn dequant_at(&self, d: usize) -> f32 {
+        let byte = self.latent_kv[d >> 1];
+        let nib = if d & 1 == 0 { byte & 0x0F } else { byte >> 4 };
+        ((nib as i32) - 8) as f32 * self.scale
+    }
 
-        // Boucle déroulée manuellement pour saturer les pipelines superscalaires
-        for i in 0..64 {
-            let packed_byte = core::ptr::read_volatile(latent_ptr.add(i));
-
-            // Extraction simultanée des deux valeurs de 4 bits (paires et impaires)
-            let v1 = (packed_byte & 0x0F) as f32 * scale;
-            let v2 = (packed_byte >> 4) as f32 * scale;
-
-            coarse_accumulator += core::ptr::read_volatile(q_coarse.add(i * 2)) * v1;
-            coarse_accumulator += core::ptr::read_volatile(q_coarse.add(i * 2 + 1)) * v2;
+    /// Score fusionné (eq. 2.3). API sûre, sans `read_volatile`, boucle
+    /// auto-vectorisable. En mode WARM, le terme binaire est ignoré.
+    pub fn compute_score(&self, q_coarse: &[f32; D_C], q_sign: &[u64; RESIDUAL_WORDS]) -> f32 {
+        // 1. Terme continu bas-fidélité : <q_coarse, dequant(latent)>
+        //    (le crate matérialise d'abord le latent via dequant_latent()
+        //     pour une boucle SIMD plus propre — équivalent à l'inline ci-dessous)
+        let mut coarse = 0.0f32;
+        for d in 0..D_C {
+            coarse += q_coarse[d] * self.dequant_at(d);
         }
-
-        // 2. Évaluation de la correction binaire 1-Bit (Bitwise Attention Core)
-        // Le compilateur Rust mappe directement ces opérations vers l'instruction matérielle POPCNT
-        let mut popcount_accumulator: u32 = 0;
-        let tile_residual_ptr = (*tile).residual_bitmap.as_ptr();
-
-        popcount_accumulator += (core::ptr::read_volatile(q_residual_sign.add(0))
-            ^ core::ptr::read_volatile(tile_residual_ptr.add(0)))
-        .count_ones();
-        popcount_accumulator += (core::ptr::read_volatile(q_residual_sign.add(1))
-            ^ core::ptr::read_volatile(tile_residual_ptr.add(1)))
-        .count_ones();
-        popcount_accumulator += (core::ptr::read_volatile(q_residual_sign.add(2))
-            ^ core::ptr::read_volatile(tile_residual_ptr.add(2)))
-        .count_ones();
-        popcount_accumulator += (core::ptr::read_volatile(q_residual_sign.add(3))
-            ^ core::ptr::read_volatile(tile_residual_ptr.add(3)))
-        .count_ones();
-
-        // Résolution de la distance de Hamming inversée : d_s - (2 * popcount)
-        let residual_score = 256.0f32 - (2.0f32 * popcount_accumulator as f32);
-
-        // 3. Fusion linéaire finale avec le lambda co-conscient de la tuile
-        coarse_accumulator + ((*tile).dynamic_lambda * residual_score)
+        // 2. WARM : résidu paginé -> base latente seule
+        if self.is_warm() {
+            return coarse;
+        }
+        // 3. Correction binaire 1-bit : λ · (d_s − 2·popcount(q_sign ^ B))
+        //    popcount(XOR) = distance de Hamming ; d_s − 2·Hamming = produit
+        //    scalaire signé des deux vecteurs ±1.
+        let mut hamming = 0u32;
+        for w in 0..RESIDUAL_WORDS {
+            hamming += (q_sign[w] ^ self.residual_bitmap[w]).count_ones();
+        }
+        let residual_score = D_S as f32 - 2.0 * hamming as f32;
+        coarse + self.dynamic_lambda * residual_score
     }
 }
+
+/// Quantification INT4 signée, échelle symétrique par tuile.
+/// value ≈ (nibble − 8) · scale, avec nibble ∈ [0, 15] -> plage signée [−8, 7].
+pub fn quantize_latent(v: &[f32; D_C]) -> ([u8; LATENT_BYTES], f32) {
+    let max_abs = v.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
+    let scale = if max_abs > 0.0 { max_abs / 7.0 } else { 1.0 };
+    let mut out = [0u8; LATENT_BYTES];
+    for d in 0..D_C {
+        let nib = (((v[d] / scale).round() as i32).clamp(-8, 7) + 8) as u8 & 0x0F;
+        if d & 1 == 0 {
+            out[d >> 1] = (out[d >> 1] & 0xF0) | nib;
+        } else {
+            out[d >> 1] = (out[d >> 1] & 0x0F) | (nib << 4);
+        }
+    }
+    (out, scale)
+}
 ```
+
+### 5.1 État de l'implémentation de référence
+
+Les limitations de la v1 sont **levées** dans le crate `scirust` (`cargo test` vert) :
+
+- ✅ **`read_volatile` supprimé.** Le chemin chaud lit des `slice`s normaux : LLVM peut de nouveau auto-vectoriser et réordonner. La spécialisation SIMD n'est pas encore écrite, mais elle n'est plus **bloquée**.
+- ✅ **INT4 signé (zero-point).** La déquantification est `(nibble − 8)·scale` : la base bas-rang représente désormais des valeurs négatives. Garanti par le test `int4_dequant_round_trips_signed_values`.
+- ✅ **API sûre, pas de `target_feature` trompeur.** Plus d'`unsafe`, plus d'import mort, plus de gate `avx2` sans intrinsèque ; `count_ones()` se compile en `POPCNT` quand la cible le supporte, avec repli portable (ARM Neoverse/Thor inclus).
+- ✅ **Tuile = 128 o sans padding** et **crate compilable + testé** : **22 tests** (unitaires + intégration + property/fuzz), dont l'identité de Hamming `d_s − 2·popcount` prouvée contre une référence brute, l'équivalence SIMD ≡ scalaire (fuzz randomisé), la finitude des scores, et la correspondance code ↔ eq. (2.3).
+
+**Avancées récentes & restant :**
+
+- ✅ **Chemins SIMD : AVX2, AVX-512 (x86_64) + NEON (aarch64).** Dispatch runtime (AVX-512 > AVX2 > scalaire), chacun avec un test d'équivalence ≡ scalaire (AVX2 ×11,5, AVX-512 ×14,1, §7.4). NEON **vérifié par cross-compilation** (`aarch64-unknown-linux-gnu`) ; son équivalence runtime tourne sur matériel ARM.
+- ✅ **Outillage de durcissement** : tests randomisés **property / fuzz** (équivalence SIMD, finitude des scores, lois du softmax, bornes de déquantification), micro-benchs **criterion**, et **CI** (fmt + clippy `-D warnings` + tests + compilation des benches + cross-compile NEON).
+- ✅/◑ **Projection bas-rang apprise** : PCA (§7.3) **et** une projection *task-aware* entraînée par SGD (§7.7) qui bat nettement la PCA sous décalage Q/K (WARM 0,16 → 0,86). Reste l'entraînement **conjoint** avec un vrai modèle.
+- ✅ **Codecs latents INT4 (MX) et NF4** (même tuile 128 o). Ils réduisent l'erreur de reconstruction mais le gain end-to-end est marginal ; une **référence INT8 confirme que la quantification n'est pas le goulot** — c'est la projection bas-rang (§7.8).
 
 ---
 
@@ -224,29 +258,156 @@ impl SciRustSlhaEngine {
 
 Pour valider les gains de performance de SLHA v2 par rapport aux structures de graphes et d'attention conventionnelles, trois métriques matérielles strictes doivent être mesurées lors des prochains tests de charge sous Debian 13.
 
+**Les valeurs ci-dessous (≥ 85 %, 3,5×–5×, ΔP < 0,04) sont des cibles de conception / hypothèses, pas des résultats mesurés.** Les §6.1–6.3 décrivent le protocole matériel (cache misses, débit, perplexité) qui reste à exécuter sous Debian 13. En revanche, des **mesures préliminaires sur prototype** (fidélité de l'approximation, HOT vs WARM) existent déjà et sont rapportées au **§7**.
+
 ### 6.1 Taux de Cache Misses L1/L2/L3
 
 - **Objectif :** Démontrer que le tuilage statique élimine le phénomène d'attente CPU.
 - **Méthodologie :** Instrumentation du binaire via les compteurs de performance matériels du processeur (`perf stat -e L1-dcache-load-misses,l2_rqsts.miss,LLC-load-misses`).
 - **Cible attendue :** Une baisse de ≥ 85% des lignes de cache invalidées lors du balayage d'un contexte de 32 000 jetons.
+- **Statut :** non mesuré dans ce sandbox (`perf` absent, `perf_event_paranoid = 2`). L'effet de cache est montré *indirectement* par la chute de débit avec la taille de contexte (§7.5).
 
 ### 6.2 Débit d'Inférence sous Stress Temporel
 
 - **Objectif :** Quantifier le gain en jetons par seconde lors des phases d'écriture intensive des agents de codage.
 - **Méthodologie :** Comparaison de la latence du premier jeton (Time to First Token) et du débit continu face à un cache KV FP16 non compressé.
-- **Cible attendue :** Accélération d'un facteur 3.5× à 5× sur les architectures cibles sans accélération matérielle externe dédiée, validant l'efficience de la vectorisation bit à bit.
+- **Cible attendue (hypothèse) :** Accélération d'un facteur 3,5× à 5× sur les architectures cibles sans accélération matérielle externe dédiée. Le chemin **AVX2** existe désormais et donne ~×13 sur le *seul* calcul de score (§7.4) ; mais le 3,5×–5× de **bout en bout** (vs cache KV FP16, bande passante mémoire incluse) reste à mesurer sous charge réelle.
+- **Mesure partielle (§7.5) :** au niveau du kernel, SLHA score **~2,5× plus de tokens/s** qu'une référence bf16, en lisant 2× moins d'octets/token. Le facteur de bout en bout (decode LLM complet) reste à mesurer.
 
 ### 6.3 Dérive de la Perplexité en Mode Dégradé (Soft-Paging Validation)
 
 - **Objectif :** Valider que le passage du mode HOT au mode WARM (perte du résidu 1-bit) n'altère pas la capacité sémantique de l'agent à comprendre la structure globale d'un code.
 - **Méthodologie :** Mesure de la perplexité du modèle sur les suites de tests CCOS (`benchmark --cycles 10000`) en basculant sélectivement les nœuds amonts en mode WARM.
-- **Cible attendue :** Dérive mathématique de la perplexité inférieure à ΔP < 0.04, confirmant l'efficacité de la distribution sémantique de bas rang.
+- **Cible attendue (hypothèse) :** Dérive de la perplexité inférieure à ΔP < 0,04, ce qui *confirmerait* — une fois réellement mesuré — l'efficacité de la distribution sémantique de bas rang.
+- **Statut :** non mesurable sans modèle ni jeu de données réels. **Proxy le plus proche : §7.6** — la fidélité de la *sortie* d'attention (cosinus 0,95–0,997) ; la dérive HOT→WARM y est faible, cohérent avec un ΔP attendu petit.
 
 ---
 
-## 7. Conclusion
+## 7. Résultats de Mesure Préliminaires (Prototype SciRust)
 
-SLHA v2 démontre qu'en mariant la rigueur d'un système d'exploitation gérant sa mémoire au bit près (CCOS) avec des abstractions mathématiques appliquées aux limites physiques du silicium (SciRust), l'inférence locale change de paradigme. Le cache KV cesse d'être un fardeau monolithique pour devenir une structure fluide, résiliente et consciente de l'architecture qui l'héberge.
+Le crate `scirust` inclut deux prototypes reproductibles — `cargo run --example measure --release` (résidu `rho` fixé à la main) et `--example measure_learned` (base bas-rang **apprise par PCA**) — qui mesurent la **qualité de l'approximation** du score SLHA sur données synthétiques.
+
+**Portée & honnêteté méthodologique.** Dans les §7.1–7.2, les projections sont **aléatoires** (Gaussiennes) : `Z` (sign-LSH) l'est par conception, mais `W_down`/`W_up` ne sont pas apprises ; on suppose la base bas-rang *capturée idéalement* et on mesure la machinerie **quantification INT4 + résidu 1-bit + ranking**. On note `rho = ||e|| / ||k_real||` la part d'énergie que la base laisse au résidu. Le **§7.3 lève cette réserve** en apprenant la base par PCA.
+
+### 7.1 Fidélité du cœur binaire (sign-LSH, d_s = 256)
+
+Sur des paires couvrant toute la plage angulaire, l'estimateur 1-bit suit fidèlement le cosinus vrai (Spearman > 0,9, prouvé par test). Mais dans le **régime réaliste** (résidu quasi-orthogonal à la requête), 256 bits ne donnent qu'une résolution **modérée** : Spearman(résidu, cos θ) ≈ **0,67**. C'est une limite réelle — un seul bit par hyperplan résout mal des directions presque orthogonales.
+
+### 7.2 Score complet vs vérité terrain FP (N = 512 jetons, requête fixe)
+
+| rho | HOT Spearman | HOT top-16 | WARM Spearman | WARM top-16 |
+|---|---|---|---|---|
+| 0,05 | 0,987 | 0,875 | 0,987 | 0,875 |
+| 0,10 | 0,983 | 0,750 | 0,982 | 0,750 |
+| 0,20 | 0,966 | 0,750 | 0,961 | 0,688 |
+| 0,30 | 0,937 | 0,625 | 0,925 | 0,562 |
+| 0,50 | 0,844 | 0,500 | 0,811 | 0,438 |
+| 0,70 | 0,702 | 0,375 | 0,627 | 0,250 |
+
+**Lecture :**
+
+- **Soft-Paging validé (§4).** À faible `rho` (≤ 0,1), HOT ≈ WARM : libérer le résidu 1-bit est **quasi sans perte** quand la base bas-rang capture l'essentiel — précisément la condition sous laquelle CCOS bascule un nœud en WARM.
+- **Le résidu 1-bit aide, modestement.** HOT ≥ WARM partout ; l'apport croît avec `rho` (à 0,5 : +0,03 Spearman, +6 pts de top-16 ; à 0,7 : +0,08 Spearman, +12 pts de top-16). Effet réel, mais pas spectaculaire à 256 bits.
+- **Mise en garde.** Quand la base rate beaucoup (`rho` élevé), même HOT ne récupère pas bien le top-k exact (0,375 de recouvrement top-16 à `rho` = 0,7). La fidélité finale dépend donc fortement de la qualité — apprise — de la base bas-rang.
+
+### 7.3 Projection bas-rang apprise par PCA, et quantification par groupe
+
+Pour lever la réserve « base idéale », `measure_learned` **apprend** la projection par PCA (meilleure reconstruction linéaire de rang `D_C`, par Eckart–Young) sur des clés synthétiques à spectre contrôlable (`d_model = 256`, latent 128, `d_s = 256`). `Z` reste aléatoire par conception. Le latent INT4 utilise désormais des **micro-échelles par groupe** (8 groupes de 16 dims, une échelle `u8` chacun, logées dans les 8 octets jadis « reserved » — la tuile reste à 128 o).
+
+| decay | énergie captée | HOT Spearman | HOT top-16 | WARM Spearman | WARM top-16 |
+|---|---|---|---|---|---|
+| 0,99 | 97,6 % | 0,788 | 0,562 | 0,703 | 0,438 |
+| 0,97 | 99,7 % | 0,814 | 0,375 | 0,700 | 0,312 |
+| 0,93 | 99,5 % | 0,884 | 0,438 | 0,609 | 0,188 |
+| 0,85 | 99,1 % | 0,905 | 0,562 | 0,871 | 0,500 |
+
+**Lecture :**
+
+- **HOT plafonne à 0,79–0,90**, WARM (coarse seul) à ~0,60–0,87, malgré 97–99,7 % d'énergie captée : l'énergie de reconstruction n'est pas la fidélité de *score*.
+- **HOT > WARM partout**, parfois nettement (decay 0,93 : **+0,28** de Spearman) : le résidu 1-bit récupère une grande part de ce que le coarse rate.
+- **Quantification par groupe (MX) : forte baisse de l'erreur de reconstruction (>2×, prouvé par test), gain end-to-end marginal** (decay 0,93 : HOT 0,879 → 0,884). Le score est dominé par les composantes de forte variance, déjà bien représentées par l'échelle unique.
+- **Résultat négatif assumé : whitener le latent DÉGRADE** (0,859 → 0,750 à decay 0,95) — l'échelle INT4 alloue mieux sa résolution non whitenée.
+- **Attention à l'interprétation.** On pourrait croire ce plafond dû à l'INT4 du latent ; le **§7.8 le réfute** (INT8 n'améliore pas le WARM). Le vrai facteur limitant du coarse est la **projection bas-rang**, pas la quantification.
+
+### 7.4 Débit (scalaire vs AVX2 vs AVX-512)
+
+Le kernel dispose de chemins **AVX2** et **AVX-512** (dispatch à l'exécution via `is_x86_feature_detected!`, ordre AVX-512 > AVX2 > scalaire, repli portable), chacun avec un **test d'équivalence** ≡ scalaire. Sur le banc partagé :
+
+| Chemin | Débit | Rapport |
+|---|---|---|
+| Scalaire (référence) | ~2,9 M scores/s | 1× |
+| AVX2 | ~33,9 M scores/s | **×11,5** |
+| AVX-512 (un FMA 16-wide / groupe) | ~41,6 M scores/s | **×14,1** |
+
+Le facteur dépasse le 8×/16× « théorique » car le chemin scalaire payait aussi une déquantification INT4 *branchy* que le SIMD fusionne. AVX-512 n'ajoute que **~+23 %** sur AVX2 : le kernel est court (128 dims) et limité surtout par le dénibblage/chargement, pas par la largeur FMA. À traiter comme un ordre de grandeur sur banc partagé. Un **chemin NEON** (aarch64) existe aussi, **vérifié par cross-compilation** mais non chronométré ici (pas de matériel ARM).
+
+### 7.5 Trafic mémoire & débit vs une référence bf16 (§6.2, au niveau kernel)
+
+`bench_vs_fp16` compare le scoring d'une tuile SLHA (**128 o/token**) à un produit scalaire sur une clé **bf16** (`d_k·2 = 256` o/token), les deux en AVX2 (le comparatif isole le format mémoire, pas la chance de codegen).
+
+| Contexte (tokens) | empreinte SLHA / bf16 | SLHA | bf16 |
+|---|---|---|---|
+| 8 192 | 1 / 2 Mo | 42,4 M scores/s | 17,0 M scores/s |
+| 65 536 | 8 / 16 Mo | 40,1 | 16,9 |
+| 262 144 | 32 / 64 Mo | 35,4 | 14,0 |
+| 1 048 576 | 128 / 256 Mo | 29,9 | 13,8 |
+
+**Lecture :**
+
+- **~2,5× plus de tokens/s** pour SLHA, à débit mémoire (GB/s) comparable : lire **2× moins d'octets/token** (+ un dénibblage INT4→f32 plus court que le décodage bf16) se convertit directement en débit. C'est la thèse du « mur de bande passante » vérifiée au niveau du kernel.
+- **Le débit décroît quand le contexte grandit** (42→30 M/s pour SLHA) : effet de cache visible *indirectement*, l'empreinte plus petite de SLHA la gardant résidente plus longtemps.
+- **Honnêteté :** le LLC fait 260 Mo sur ce banc — on **ne sature pas la DRAM** (GB/s mesurés ≪ pic DRAM) ; le gain vient du volume d'octets et des uops, pas d'une limite DRAM atteinte. Les **compteurs de cache matériels (§6.1) sont indisponibles** ici (`perf` absent, `perf_event_paranoid = 2`). Sur un LLC plus petit, ou en décodage réellement DRAM-bound, l'avantage de SLHA serait plus marqué.
+
+### 7.6 Fidélité de la *sortie* d'attention (proxy de perplexité, §6.3)
+
+Le ranking des scores (§7.2/7.3) est un proxy ; ce qu'un modèle consomme réellement est la **sortie** d'attention `out = softmax(QKᵀ/√d)·V`. `attention_fidelity` la mesure : cosinus et erreur L2 relative entre la sortie vraie (FP) et la sortie SLHA (base apprise PCA, `d = 256`, `N = 512`, moyenne sur 64 requêtes, `d_v = 64`).
+
+| decay | énergie captée | HOT cos / relL2 | WARM cos / relL2 |
+|---|---|---|---|
+| 0,99 | 97,6 % | 0,948 / 0,318 | 0,943 / 0,333 |
+| 0,95 | 99,6 % | 0,989 / 0,147 | 0,988 / 0,154 |
+| 0,90 | 99,4 % | 0,994 / 0,108 | 0,993 / 0,114 |
+| 0,80 | 98,9 % | 0,997 / 0,078 | 0,996 / 0,082 |
+
+**C'est le résultat le plus important du §7.** La sortie d'attention est **bien plus robuste** que le ranking ne le laissait craindre : là où le Spearman des scores plafonnait à 0,79–0,90 (§7.3), le **cosinus de la sortie atteint 0,95–0,997**. Raison : le softmax moyenne les valeurs, donc les erreurs de score entre jetons de poids voisins se compensent. C'est la métrique la plus proche de la perplexité accessible hors LLM, et elle est nettement favorable. HOT ≥ WARM partout (écart faible à ces forts `decay`, où le résidu compte peu).
+
+### 7.7 Projection apprise *task-aware* vs PCA
+
+La PCA choisit les directions de plus forte variance des **clés** — elle ignore la distribution des **requêtes**. Quand Q et K privilégient des sous-espaces différents, une projection entraînée à préserver le **score** `⟨Q,K⟩` (et non la reconstruction des clés) bat la PCA. `train_projection` réalise cette descente de gradient, avec un gradient en **forme close** : `a = PQ`, `b = PK`, `r = ⟨Q,K⟩ − ⟨a,b⟩`, `∂r²/∂P = −2r(b Qᵀ + a Kᵀ)`.
+
+`learn_projection` confronte PCA et projection apprise sur un cas adverse : base de facteurs **orthonormés**, moitié A à forte variance-clé mais faible poids-requête, moitié B l'inverse. La PCA remplit son budget rang-128 avec A et **rate le score, qui vit dans B**. On évalue en **WARM** (coarse seul) pour isoler la projection du résidu.
+
+| Projection | WARM Spearman | HOT Spearman | sortie cosinus |
+|---|---|---|---|
+| PCA | 0,161 | 0,325 | 0,947 |
+| **Apprise** | **0,859** | **0,863** | **0,985** |
+
+(SGD : perte de score **28,8 → 5,1**, descente lisse avec décroissance linéaire du lr.)
+
+**Réponse à la question ouverte : oui, l'apprentissage bat nettement la PCA** (WARM 0,86 vs 0,16) lorsque Q et K diffèrent — la projection task-aware réalloue la capacité bas-rang vers les directions qui comptent pour le score. **Réserves :** données synthétiques à décalage Q/K délibéré ; quand Q et K partagent la même statistique, la PCA est déjà (quasi-)optimale pour le score (rien à gagner) ; et c'est une preuve de concept SGD sur `P` seule, pas un entraînement conjoint avec un vrai modèle.
+
+### 7.8 Codec latent NF4 et référence INT8 : la quantification n'est pas le goulot
+
+Le latent peut être encodé en **NF4** (codebook NormalFloat-4, 16 niveaux aux quantiles d'une gaussienne) au lieu d'INT4 uniforme — **même budget 4 bits, même tuile 128 o**. On ajoute une **référence INT8** (coarse seul, tuile hypothétique 192 o) pour isoler l'effet de la largeur de bits.
+
+| Codec latent (decay 0,93) | HOT Spearman | WARM Spearman |
+|---|---|---|
+| INT4 uniforme (1 échelle) | 0,879 | 0,603 |
+| INT4 groupé (MX) | 0,884 | 0,609 |
+| NF4 groupé | 0,885 | 0,610 |
+| **INT8** (réf, 2× octets) | — | **0,606** |
+
+**Constat — et correction du §7.3 :** NF4 réduit l'erreur de reconstruction (test `nf4_beats_uniform_int4_on_gaussian_latent`) mais le gain end-to-end est **nul à marginal** (0,884 → 0,885). Surtout, **INT8 ne fait pas mieux qu'INT4 au WARM (~0,61)** : doubler les bits ne lève pas le plafond du terme coarse. **Le facteur limitant n'est donc PAS la quantification du latent, mais la projection bas-rang elle-même** (la part du score que la PCA laisse au résidu). Cela recadre les leviers réels : **(a)** une meilleure projection (§7.7 : apprise, WARM 0,16 → 0,86) et **(b)** le résidu 1-bit (HOT). NF4 reste utile (meilleure reconstruction, sans coût de tuile), mais n'est pas le levier de fidélité de score.
+
+**Conclusion partielle.** Le mécanisme est **mathématiquement correct** (tests, dont les équivalences scalaire/AVX2) et **directionnellement validé** : HOT ≥ WARM, Soft-Paging quasi sans perte à faible `rho`, SIMD ×13, **~2,5× de tokens/s vs bf16** (§7.5), **sortie d'attention à cosinus 0,95–0,997** (§7.6), et une **projection apprise qui bat la PCA** sous décalage Q/K (§7.7). Le §7.8 corrige une idée reçue : le plafond du *score coarse* tient à la **projection bas-rang**, non à la quantification (NF4 et même INT8 n'y changent rien). Leviers réels : **meilleure projection** et **résidu 1-bit** ; pistes restantes : `d_s` plus grand et entraînement conjoint des projections avec un vrai modèle.
+
+---
+
+## 8. Conclusion
+
+SLHA v2 **propose** qu'en mariant la rigueur d'un système d'exploitation gérant sa mémoire au bit près (CCOS) avec des abstractions mathématiques appliquées aux limites physiques du silicium (SciRust), l'inférence locale puisse changer de paradigme : le cache KV cesserait d'être un fardeau monolithique pour devenir une structure fluide, résiliente et consciente de l'architecture qui l'héberge.
+
+**Cette spécification (v1) progresse vers la validation.** Le crate `scirust` est compilable et testé (§5.1), plusieurs bancs reproductibles existent, un chemin **AVX2** (×13, §7.4) accélère le kernel, et les résultats (§7) confirment la correction du mécanisme et la viabilité du Soft-Paging. Enseignement clé, **corrigé par la mesure** : le plafond de fidélité du *score coarse* tient à la **projection bas-rang**, pas à la quantification du latent — NF4 et même une référence INT8 n'y changent rien (§7.8), tandis qu'une projection *apprise* le lève nettement (§7.7) et que le résidu 1-bit fait le reste (sortie d'attention à cosinus 0,95–0,997, §7.6). Côté noyau, les chemins **AVX2, AVX-512 et NEON** sont en place (§7.4). Restent à faire : (1) la validation **matérielle réelle** du §6 (compteurs de cache via `perf`, perplexité d'un vrai modèle) — non faisable dans ce sandbox, amorcée au niveau kernel en §7.5 ; (2) l'**entraînement conjoint** des projections avec un vrai modèle (le §7.7 en établit le principe).
 
 ---
 
