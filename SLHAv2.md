@@ -278,7 +278,7 @@ Pour valider les gains de performance de SLHA v2 par rapport aux structures de g
 - **Objectif :** Valider que le passage du mode HOT au mode WARM (perte du résidu 1-bit) n'altère pas la capacité sémantique de l'agent à comprendre la structure globale d'un code.
 - **Méthodologie :** Mesure de la perplexité du modèle sur les suites de tests CCOS (`benchmark --cycles 10000`) en basculant sélectivement les nœuds amonts en mode WARM.
 - **Cible attendue (hypothèse) :** Dérive de la perplexité inférieure à ΔP < 0,04, ce qui *confirmerait* — une fois réellement mesuré — l'efficacité de la distribution sémantique de bas rang.
-- **Statut :** non mesurable sans modèle ni jeu de données réels. En attendant, le §7 fournit des **proxys** quantitatifs (fidélité du score, dérive HOT→WARM par rang/top-k).
+- **Statut :** non mesurable sans modèle ni jeu de données réels. **Proxy le plus proche : §7.6** — la fidélité de la *sortie* d'attention (cosinus 0,95–0,997) ; la dérive HOT→WARM y est faible, cohérent avec un ΔP attendu petit.
 
 ---
 
@@ -355,7 +355,20 @@ Le facteur dépasse les 8× théoriques du SIMD `f32` car le chemin scalaire pay
 - **Le débit décroît quand le contexte grandit** (42→30 M/s pour SLHA) : effet de cache visible *indirectement*, l'empreinte plus petite de SLHA la gardant résidente plus longtemps.
 - **Honnêteté :** le LLC fait 260 Mo sur ce banc — on **ne sature pas la DRAM** (GB/s mesurés ≪ pic DRAM) ; le gain vient du volume d'octets et des uops, pas d'une limite DRAM atteinte. Les **compteurs de cache matériels (§6.1) sont indisponibles** ici (`perf` absent, `perf_event_paranoid = 2`). Sur un LLC plus petit, ou en décodage réellement DRAM-bound, l'avantage de SLHA serait plus marqué.
 
-**Conclusion partielle.** Le mécanisme est **mathématiquement correct** (tests, dont les équivalences scalaire/AVX2) et **directionnellement validé** : HOT ≥ WARM, Soft-Paging quasi sans perte à faible `rho`, accélération SIMD ×13, et **~2,5× de tokens/s vs bf16** grâce à l'empreinte 2× plus petite (§7.5). Deux bémols : (1) avec une base *apprise*, le goulot de fidélité devient l'**INT4 du latent** ; (2) les gains du résidu 1-bit restent **modérés** à `d_s = 256`. Pistes : résolution latente plus large (INT8 / NF4), `d_s` plus grand, projections apprises de bout en bout.
+### 7.6 Fidélité de la *sortie* d'attention (proxy de perplexité, §6.3)
+
+Le ranking des scores (§7.2/7.3) est un proxy ; ce qu'un modèle consomme réellement est la **sortie** d'attention `out = softmax(QKᵀ/√d)·V`. `attention_fidelity` la mesure : cosinus et erreur L2 relative entre la sortie vraie (FP) et la sortie SLHA (base apprise PCA, `d = 256`, `N = 512`, moyenne sur 64 requêtes, `d_v = 64`).
+
+| decay | énergie captée | HOT cos / relL2 | WARM cos / relL2 |
+|---|---|---|---|
+| 0,99 | 97,6 % | 0,948 / 0,318 | 0,943 / 0,333 |
+| 0,95 | 99,6 % | 0,989 / 0,147 | 0,988 / 0,154 |
+| 0,90 | 99,4 % | 0,994 / 0,108 | 0,993 / 0,114 |
+| 0,80 | 98,9 % | 0,997 / 0,078 | 0,996 / 0,082 |
+
+**C'est le résultat le plus important du §7.** La sortie d'attention est **bien plus robuste** que le ranking ne le laissait craindre : là où le Spearman des scores plafonnait à 0,79–0,90 (§7.3), le **cosinus de la sortie atteint 0,95–0,997**. Raison : le softmax moyenne les valeurs, donc les erreurs de score entre jetons de poids voisins se compensent. C'est la métrique la plus proche de la perplexité accessible hors LLM, et elle est nettement favorable. HOT ≥ WARM partout (écart faible à ces forts `decay`, où le résidu compte peu).
+
+**Conclusion partielle.** Le mécanisme est **mathématiquement correct** (tests, dont les équivalences scalaire/AVX2) et **directionnellement validé** : HOT ≥ WARM, Soft-Paging quasi sans perte à faible `rho`, SIMD ×13, **~2,5× de tokens/s vs bf16** (§7.5), et surtout une **sortie d'attention à cosinus 0,95–0,997** malgré des scores plus bruités (§7.6) — le softmax absorbe l'essentiel de l'erreur. Bémols : (1) le goulot de fidélité du *score* devient l'**INT4 du latent** ; (2) le résidu 1-bit reste **modéré** à `d_s = 256`. Pistes : INT8 / NF4, `d_s` plus grand, projections apprises de bout en bout.
 
 ---
 

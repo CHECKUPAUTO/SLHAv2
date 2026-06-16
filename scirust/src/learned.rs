@@ -317,4 +317,65 @@ mod tests {
         let grouped = hot_sp(true);
         assert!(grouped + 0.02 >= single, "grouped {grouped} worse than single {single}");
     }
+
+    #[test]
+    fn attention_output_is_high_fidelity_and_hot_ge_warm() {
+        // The softmax-weighted value output is far more robust to score error
+        // than raw ranking. Cosine(out_true, out_hot) must be high, HOT >= WARM.
+        use crate::attention::slha_v2::FLAG_WARM;
+        use crate::metrics::{cosine, softmax_into};
+        use crate::rng::Rng;
+
+        let (d, dv, n) = (160usize, 48usize, 200usize);
+        let train = gen_keys(1, 600, d, 200, 0.9, 0.02);
+        let model = LearnedModel::fit(&train, d, 7, false);
+        let keys = gen_keys(2, n, d, 200, 0.9, 0.02);
+        let mut rng = Rng::new(5);
+        let values: Vec<Vec<f32>> = (0..n)
+            .map(|_| {
+                let mut v = vec![0.0f32; dv];
+                rng.fill_gaussian(&mut v);
+                v
+            })
+            .collect();
+        let tiles: Vec<_> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| model.encode(k, i as u32, false))
+            .collect();
+
+        let mut q = vec![0.0f32; d];
+        rng.fill_gaussian(&mut q);
+        let qc = model.query_coarse(&q);
+        let qs = model.sign_bits(&q);
+        let scale = 1.0 / (d as f32).sqrt();
+
+        let s_true: Vec<f32> = keys.iter().map(|k| dot(&q, k)).collect();
+        let s_hot: Vec<f32> = tiles.iter().map(|t| t.compute_score(&qc, &qs)).collect();
+        let s_warm: Vec<f32> = tiles
+            .iter()
+            .map(|t| {
+                let mut w = t.clone();
+                w.flags |= FLAG_WARM;
+                w.compute_score(&qc, &qs)
+            })
+            .collect();
+
+        let agg = |s: &[f32]| -> Vec<f32> {
+            let mut w = vec![0.0f32; n];
+            softmax_into(s, scale, &mut w);
+            let mut o = vec![0.0f32; dv];
+            for (wi, v) in w.iter().zip(&values) {
+                for j in 0..dv {
+                    o[j] += wi * v[j];
+                }
+            }
+            o
+        };
+        let ot = agg(&s_true);
+        let ch = cosine(&ot, &agg(&s_hot));
+        let cw = cosine(&ot, &agg(&s_warm));
+        assert!(ch > 0.9, "HOT attention-output cosine {ch} too low");
+        assert!(ch + 0.02 >= cw, "HOT {ch} < WARM {cw}");
+    }
 }

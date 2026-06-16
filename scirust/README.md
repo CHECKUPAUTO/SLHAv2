@@ -14,11 +14,13 @@ Hybrid Attention) décrit dans [`../SLHAv2.md`](../SLHAv2.md).
 ## Build / test / mesure
 
 ```sh
-cargo test                                    # 13 tests : Hamming, layout 128 o, zero-point INT4, WARM,
-                                              # sign-LSH, Jacobi, PCA, INT4 groupé (MX), AVX2≡scalaire (+ NEON sur ARM)
-cargo run --example measure --release         # rho fixé : fidélité, HOT vs WARM, débit scalaire vs AVX2
-cargo run --example measure_learned --release # base apprise par PCA + INT4 groupé (MX)
-cargo run --example bench_vs_fp16 --release   # SLHA 128 o vs clé bf16 256 o : débit & trafic mémoire
+cargo test                                      # 14 tests : Hamming, layout 128 o, zero-point INT4, WARM,
+                                                # sign-LSH, Jacobi, PCA, INT4 groupé (MX), sortie d'attention,
+                                                # AVX2≡scalaire (+ NEON sur ARM)
+cargo run --example measure --release           # rho fixé : fidélité, HOT vs WARM, débit scalaire vs AVX2
+cargo run --example measure_learned --release   # base apprise par PCA + INT4 groupé (MX)
+cargo run --example bench_vs_fp16 --release      # SLHA 128 o vs clé bf16 256 o : débit & trafic mémoire
+cargo run --example attention_fidelity --release # fidélité de la sortie softmax·V (proxy perplexité)
 ```
 
 **Zéro dépendance externe** : le crate compile et se teste entièrement
@@ -52,3 +54,4 @@ faible énergie résiduelle, gains du résidu 1-bit modérés à `d_s = 256`.
 | `../examples/measure.rs` | Prototype de mesure (`rho` fixé) |
 | `../examples/measure_learned.rs` | Prototype avec base apprise (PCA) + INT4 groupé (MX) |
 | `../examples/bench_vs_fp16.rs` | Débit / trafic mémoire : SLHA (128 o) vs clé bf16 (256 o) |
+| `../examples/attention_fidelity.rs` | Fidélité de la sortie `softmax·V` (proxy de perplexité) |

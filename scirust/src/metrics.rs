@@ -70,3 +70,44 @@ pub fn topk_overlap(truth: &[f32], approx: &[f32], k: usize) -> f32 {
 pub fn rms(v: &[f32]) -> f32 {
     (v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32).sqrt()
 }
+
+/// Cosine similarity between two vectors.
+pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let na = dot(a, a).sqrt();
+    let nb = dot(b, b).sqrt();
+    if na * nb == 0.0 {
+        0.0
+    } else {
+        dot(a, b) / (na * nb)
+    }
+}
+
+/// Relative L2 error `||a - b|| / ||a||` (a is the reference).
+pub fn rel_l2(reference: &[f32], approx: &[f32]) -> f32 {
+    let mut nd = 0.0f32;
+    let mut na = 0.0f32;
+    for i in 0..reference.len() {
+        nd += (reference[i] - approx[i]).powi(2);
+        na += reference[i] * reference[i];
+    }
+    (nd / na.max(1e-12)).sqrt()
+}
+
+/// Numerically stable softmax of `scores * scale` into `out`.
+pub fn softmax_into(scores: &[f32], scale: f32, out: &mut [f32]) {
+    debug_assert_eq!(scores.len(), out.len());
+    let mut m = f32::NEG_INFINITY;
+    for &x in scores {
+        m = m.max(x * scale);
+    }
+    let mut sum = 0.0f32;
+    for (o, &x) in out.iter_mut().zip(scores) {
+        let e = (x * scale - m).exp();
+        *o = e;
+        sum += e;
+    }
+    let inv = 1.0 / sum;
+    for o in out.iter_mut() {
+        *o *= inv;
+    }
+}
