@@ -14,18 +14,22 @@ Hybrid Attention) décrit dans [`../SLHAv2.md`](../SLHAv2.md).
 ## Build / test / mesure
 
 ```sh
-cargo test                                       # 17 tests : Hamming, layout 128 o, zero-point INT4, WARM,
-                                                 # sign-LSH, Jacobi, PCA, INT4 groupé (MX), NF4, sortie d'attention,
-                                                 # SGD task-aware, AVX2/AVX-512≡scalaire (+ NEON sur ARM)
-cargo run --example measure --release            # rho fixé : fidélité, HOT vs WARM, débit scalaire vs AVX2
-cargo run --example measure_learned --release    # base apprise par PCA + INT4 groupé (MX)
+cargo test                                       # 22 tests : unitaires + intégration + property/fuzz
+                                                 #  (Hamming, layout 128 o, zero-point, WARM, sign-LSH, Jacobi,
+                                                 #   PCA, MX, NF4, sortie d'attention, SGD, SIMD≡scalaire,
+                                                 #   + property : SIMD≡scalaire fuzz, finitude, softmax, bornes dequant)
+cargo bench                                      # micro-benchs criterion (scalaire / AVX2 / AVX-512)
+cargo run --example measure --release            # rho fixé : fidélité, HOT vs WARM, débit scalaire/AVX2/AVX-512
+cargo run --example measure_learned --release    # base apprise par PCA + codecs INT4 (MX) / NF4 + réf INT8
 cargo run --example bench_vs_fp16 --release       # SLHA 128 o vs clé bf16 256 o : débit & trafic mémoire
 cargo run --example attention_fidelity --release  # fidélité de la sortie softmax·V (proxy perplexité)
 cargo run --example learn_projection --release    # projection apprise (task-aware) vs PCA
 ```
 
-**Zéro dépendance externe** : le crate compile et se teste entièrement
-hors-ligne (PRNG déterministe maison, pas de `rand`/`criterion`).
+**Bibliothèque sans dépendance** : la lib n'ajoute rien à l'arbre d'un
+consommateur (PRNG déterministe maison). Seuls les **benches** tirent une
+`criterion` allégée (dev-dependency, sans plotters/rayon) ; les tests
+property/fuzz restent eux aussi sans dépendance.
 
 ## Statut (voir §5.1 et §7 du paper)
 
@@ -52,6 +56,8 @@ faible énergie résiduelle, gains du résidu 1-bit modérés à `d_s = 256`.
 | `metrics.rs` | `dot`, Pearson, Spearman, top-k overlap |
 | `rng.rs` | PRNG déterministe (SplitMix64) + échantillonneur gaussien |
 | `../tests/slha.rs` | Tests d'intégration (preuves) |
+| `../tests/properties.rs` | Tests randomisés property / fuzz (zéro-dépendance) |
+| `../benches/kernel.rs` | Micro-benchs criterion du kernel |
 | `../examples/measure.rs` | Prototype de mesure (`rho` fixé) |
 | `../examples/measure_learned.rs` | Prototype avec base apprise (PCA) + INT4 groupé (MX) |
 | `../examples/bench_vs_fp16.rs` | Débit / trafic mémoire : SLHA (128 o) vs clé bf16 (256 o) |

@@ -243,13 +243,14 @@ Les limitations de la v1 sont **levées** dans le crate `scirust` (`cargo test` 
 - ✅ **`read_volatile` supprimé.** Le chemin chaud lit des `slice`s normaux : LLVM peut de nouveau auto-vectoriser et réordonner. La spécialisation SIMD n'est pas encore écrite, mais elle n'est plus **bloquée**.
 - ✅ **INT4 signé (zero-point).** La déquantification est `(nibble − 8)·scale` : la base bas-rang représente désormais des valeurs négatives. Garanti par le test `int4_dequant_round_trips_signed_values`.
 - ✅ **API sûre, pas de `target_feature` trompeur.** Plus d'`unsafe`, plus d'import mort, plus de gate `avx2` sans intrinsèque ; `count_ones()` se compile en `POPCNT` quand la cible le supporte, avec repli portable (ARM Neoverse/Thor inclus).
-- ✅ **Tuile = 128 o sans padding** et **crate compilable + testé** : 7 tests, dont l'identité de Hamming `d_s − 2·popcount` prouvée contre une référence brute, et la correspondance code ↔ eq. (2.3).
+- ✅ **Tuile = 128 o sans padding** et **crate compilable + testé** : **22 tests** (unitaires + intégration + property/fuzz), dont l'identité de Hamming `d_s − 2·popcount` prouvée contre une référence brute, l'équivalence SIMD ≡ scalaire (fuzz randomisé), la finitude des scores, et la correspondance code ↔ eq. (2.3).
 
 **Avancées récentes & restant :**
 
 - ✅ **Chemins SIMD : AVX2, AVX-512 (x86_64) + NEON (aarch64).** Dispatch runtime (AVX-512 > AVX2 > scalaire), chacun avec un test d'équivalence ≡ scalaire (AVX2 ×11,5, AVX-512 ×14,1, §7.4). NEON **vérifié par cross-compilation** (`aarch64-unknown-linux-gnu`) ; son équivalence runtime tourne sur matériel ARM.
-- ◑ **Projection bas-rang apprise** : le §7.3 l'aborde par PCA (optimal linéaire) et révèle que le goulot de fidélité devient alors l'**INT4 du latent**. Reste l'apprentissage de bout en bout des projections conjointement au modèle.
-- ◑ **Quantification latente par groupe (MX)** implémentée : 8 micro-échelles `u8` logées dans les ex-octets `reserved` (scalaire + AVX2, test). Elle réduit >2× l'erreur de reconstruction mais le gain end-to-end est marginal — le vrai plafond est la **résolution 4 bits** (§7.3). Pistes : **INT8 / NF4** latent, ou `d_s` plus grand.
+- ✅ **Outillage de durcissement** : tests randomisés **property / fuzz** (équivalence SIMD, finitude des scores, lois du softmax, bornes de déquantification), micro-benchs **criterion**, et **CI** (fmt + clippy `-D warnings` + tests + compilation des benches + cross-compile NEON).
+- ✅/◑ **Projection bas-rang apprise** : PCA (§7.3) **et** une projection *task-aware* entraînée par SGD (§7.7) qui bat nettement la PCA sous décalage Q/K (WARM 0,16 → 0,86). Reste l'entraînement **conjoint** avec un vrai modèle.
+- ✅ **Codecs latents INT4 (MX) et NF4** (même tuile 128 o). Ils réduisent l'erreur de reconstruction mais le gain end-to-end est marginal ; une **référence INT8 confirme que la quantification n'est pas le goulot** — c'est la projection bas-rang (§7.8).
 
 ---
 

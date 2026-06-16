@@ -9,8 +9,15 @@ license = "MIT OR Apache-2.0"
 name = "scirust"
 path = "src/lib.rs"
 
-# Zero external dependencies on purpose: the crate must build and test fully
-# offline, regardless of the environment network policy.
+# The library itself has ZERO external dependencies (it builds offline and adds
+# nothing to a consumer's tree). The only dev-dependency is a *lean* criterion
+# (no plotters/rayon/html) used solely by `cargo bench`.
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "kernel"
+harness = false
 
 [profile.release]
 opt-level = 3

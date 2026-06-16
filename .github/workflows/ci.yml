@@ -20,7 +20,9 @@ jobs:
         run: cargo fmt --check
       - name: Clippy (warnings = errors)
         run: cargo clippy --all-targets -- -D warnings
-      - name: Tests
+      - name: Tests (unit + integration + property/fuzz)
         run: cargo test
+      - name: Benchmarks compile
+        run: cargo bench --no-run
       - name: NEON path cross-compile check (aarch64)
         run: cargo build --lib --target aarch64-unknown-linux-gnu
