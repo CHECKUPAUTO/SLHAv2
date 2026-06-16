@@ -4,6 +4,11 @@
 use std::collections::HashSet;
 
 /// Plain dot product — the full-precision ground-truth attention score.
+///
+/// ```
+/// use scirust::metrics::dot;
+/// assert!((dot(&[1.0, 2.0, 3.0], &[1.0, 0.0, -1.0]) + 2.0).abs() < 1e-6);
+/// ```
 #[inline]
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
@@ -72,6 +77,12 @@ pub fn rms(v: &[f32]) -> f32 {
 }
 
 /// Cosine similarity between two vectors.
+///
+/// ```
+/// use scirust::metrics::cosine;
+/// assert!((cosine(&[1.0, 0.0], &[2.0, 0.0]) - 1.0).abs() < 1e-6);
+/// assert!(cosine(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6);
+/// ```
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     let na = dot(a, a).sqrt();
     let nb = dot(b, b).sqrt();
@@ -94,6 +105,14 @@ pub fn rel_l2(reference: &[f32], approx: &[f32]) -> f32 {
 }
 
 /// Numerically stable softmax of `scores * scale` into `out`.
+///
+/// ```
+/// use scirust::metrics::softmax_into;
+/// let mut w = [0.0f32; 3];
+/// softmax_into(&[0.0, 0.0, 0.0], 1.0, &mut w);
+/// assert!((w.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+/// assert!((w[0] - 1.0 / 3.0).abs() < 1e-6);
+/// ```
 pub fn softmax_into(scores: &[f32], scale: f32, out: &mut [f32]) {
     debug_assert_eq!(scores.len(), out.len());
     let mut m = f32::NEG_INFINITY;

@@ -14,10 +14,11 @@ Hybrid Attention) décrit dans [`../SLHAv2.md`](../SLHAv2.md).
 ## Build / test / mesure
 
 ```sh
-cargo test                                       # 22 tests : unitaires + intégration + property/fuzz
+cargo test                                       # 30 tests : unitaires + intégration + property/fuzz + doctests
                                                  #  (Hamming, layout 128 o, zero-point, WARM, sign-LSH, Jacobi,
-                                                 #   PCA, MX, NF4, sortie d'attention, SGD, SIMD≡scalaire,
-                                                 #   + property : SIMD≡scalaire fuzz, finitude, softmax, bornes dequant)
+                                                 #   PCA, MX, NF4, sortie d'attention, SGD, SIMD≡scalaire ;
+                                                 #   property : fuzz SIMD≡scalaire, finitude, softmax, bornes dequant,
+                                                 #   déterminisme, complément de signe, borne du résidu, codebook NF4)
 cargo bench                                      # micro-benchs criterion (scalaire / AVX2 / AVX-512)
 cargo run --example measure --release            # rho fixé : fidélité, HOT vs WARM, débit scalaire/AVX2/AVX-512
 cargo run --example measure_learned --release    # base apprise par PCA + codecs INT4 (MX) / NF4 + réf INT8

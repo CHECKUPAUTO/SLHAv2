@@ -10,11 +10,12 @@
 //! - INT4(MX) and NF4 dequantisation stay within their per-group error bound.
 
 use scirust::attention::slha_v2::{
-    quantize_latent_grouped, quantize_latent_nf4, SciRustSlhaTile, D_C, FLAG_NF4, FLAG_WARM,
-    GROUP_DIM, LATENT_BYTES, N_GROUPS, RESIDUAL_WORDS,
+    quantize_latent_grouped, quantize_latent_nf4, SciRustSlhaTile, D_C, D_S, FLAG_NF4, FLAG_WARM,
+    GROUP_DIM, LATENT_BYTES, NF4_CODEBOOK, N_GROUPS, RESIDUAL_WORDS,
 };
 use scirust::metrics::softmax_into;
 use scirust::rng::Rng;
+use scirust::scenario::{build_tile, generate, Projection, D_K};
 
 fn rand_q(rng: &mut Rng) -> [f32; D_C] {
     let mut q = [0.0f32; D_C];
@@ -175,4 +176,98 @@ fn prop_dequant_error_within_bound() {
             assert!((dq2[d] - v[d]).abs() <= 0.16 * eff + 1e-5, "nf4 dim {d}");
         }
     }
+}
+
+// --- Round 2: extra invariants -------------------------------------------------
+
+#[test]
+fn prop_rng_and_encode_are_deterministic() {
+    let mut a = Rng::new(42);
+    let mut b = Rng::new(42);
+    for _ in 0..256 {
+        assert_eq!(a.next_u64(), b.next_u64());
+    }
+    // Same key + projection -> byte-identical tile (reproducible encoding).
+    let proj = Projection::new(1);
+    let (_q, toks) = generate(5, 4, 0.4);
+    let t1 = build_tile(&proj, &toks[0], 0, false);
+    let t2 = build_tile(&proj, &toks[0], 0, false);
+    assert_eq!(t1.latent_kv, t2.latent_kv);
+    assert_eq!(t1.residual_bitmap, t2.residual_bitmap);
+    assert_eq!(t1.group_scales, t2.group_scales);
+    assert_eq!(t1.scale.to_bits(), t2.scale.to_bits());
+    assert_eq!(t1.dynamic_lambda.to_bits(), t2.dynamic_lambda.to_bits());
+}
+
+#[test]
+fn prop_sign_bits_negation_flips_all_bits() {
+    // sign(Z·(-v)) is the bitwise complement of sign(Z·v): all D_S signs flip.
+    let proj = Projection::new(2);
+    let mut rng = Rng::new(3);
+    for _ in 0..200 {
+        let mut v = [0.0f32; D_K];
+        rng.fill_gaussian(&mut v);
+        let mut nv = v;
+        for x in nv.iter_mut() {
+            *x = -*x;
+        }
+        let a = proj.sign_bits(&v);
+        let b = proj.sign_bits(&nv);
+        let ham: u32 = (0..RESIDUAL_WORDS)
+            .map(|w| (a[w] ^ b[w]).count_ones())
+            .sum();
+        assert_eq!(ham, D_S as u32, "negation should flip every sign bit");
+    }
+}
+
+#[test]
+fn prop_residual_term_bounded_by_lambda_ds() {
+    // HOT - WARM = λ·(d_s - 2·popcount) ∈ [-|λ|·d_s, |λ|·d_s].
+    let mut rng = Rng::new(4);
+    for _ in 0..500 {
+        let tile = rand_int4_tile(&mut rng, false);
+        let q = rand_q(&mut rng);
+        let qs = rand_q_sign(&mut rng);
+        let mut warm = tile.clone();
+        warm.flags |= FLAG_WARM;
+        let residual = tile.compute_score(&q, &qs) - warm.compute_score(&q, &qs);
+        let bound = tile.dynamic_lambda.abs() * D_S as f32;
+        assert!(residual.abs() <= bound + 1e-2, "{residual} exceeds {bound}");
+    }
+}
+
+#[test]
+fn prop_nf4_codebook_is_well_formed() {
+    assert_eq!(NF4_CODEBOOK.len(), 16);
+    assert_eq!(NF4_CODEBOOK[0], -1.0);
+    assert_eq!(NF4_CODEBOOK[15], 1.0);
+    for i in 1..16 {
+        assert!(
+            NF4_CODEBOOK[i] > NF4_CODEBOOK[i - 1],
+            "not ascending at {i}"
+        );
+    }
+    for i in 0..16 {
+        assert!(
+            (NF4_CODEBOOK[i] + NF4_CODEBOOK[15 - i]).abs() < 1e-6,
+            "not symmetric at {i}"
+        );
+    }
+}
+
+#[test]
+fn prop_degenerate_tiles_stay_finite() {
+    // Zero latent / zero scale / extreme λ / all-ones query sign must stay finite
+    // (no panic, no NaN/inf) for both INT4 and NF4.
+    let mut base = rand_int4_tile(&mut Rng::new(1), false);
+    base.latent_kv = [0u8; LATENT_BYTES];
+    base.scale = 0.0;
+    base.dynamic_lambda = 1.0e6;
+    base.group_scales = [1u8; N_GROUPS];
+    let q = [1.0e3f32; D_C];
+    let qs = [u64::MAX; RESIDUAL_WORDS];
+    assert!(base.compute_score(&q, &qs).is_finite());
+    let mut nf4 = base.clone();
+    nf4.flags |= FLAG_NF4;
+    assert!(nf4.compute_score(&q, &qs).is_finite());
 }

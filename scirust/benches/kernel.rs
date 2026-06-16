@@ -75,5 +75,23 @@ fn score_batch(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, score_batch);
+fn encode_batch(c: &mut Criterion) {
+    let proj = Projection::new(1);
+    let (_q, toks) = generate(1, 1024, 0.3);
+    let mut g = c.benchmark_group("build_tile/1024");
+    g.throughput(Throughput::Elements(toks.len() as u64));
+    g.bench_function("encode", |b| {
+        b.iter(|| {
+            let mut acc = 0u32;
+            for (i, t) in toks.iter().enumerate() {
+                let tile = build_tile(black_box(&proj), black_box(t), i as u32, false);
+                acc = acc.wrapping_add(tile.latent_kv[0] as u32);
+            }
+            black_box(acc)
+        })
+    });
+    g.finish();
+}
+
+criterion_group!(benches, score_batch, encode_batch);
 criterion_main!(benches);
