@@ -14,13 +14,14 @@ Hybrid Attention) décrit dans [`../SLHAv2.md`](../SLHAv2.md).
 ## Build / test / mesure
 
 ```sh
-cargo test                                      # 14 tests : Hamming, layout 128 o, zero-point INT4, WARM,
-                                                # sign-LSH, Jacobi, PCA, INT4 groupé (MX), sortie d'attention,
-                                                # AVX2≡scalaire (+ NEON sur ARM)
-cargo run --example measure --release           # rho fixé : fidélité, HOT vs WARM, débit scalaire vs AVX2
-cargo run --example measure_learned --release   # base apprise par PCA + INT4 groupé (MX)
-cargo run --example bench_vs_fp16 --release      # SLHA 128 o vs clé bf16 256 o : débit & trafic mémoire
-cargo run --example attention_fidelity --release # fidélité de la sortie softmax·V (proxy perplexité)
+cargo test                                       # 15 tests : Hamming, layout 128 o, zero-point INT4, WARM,
+                                                 # sign-LSH, Jacobi, PCA, INT4 groupé (MX), sortie d'attention,
+                                                 # SGD task-aware, AVX2≡scalaire (+ NEON sur ARM)
+cargo run --example measure --release            # rho fixé : fidélité, HOT vs WARM, débit scalaire vs AVX2
+cargo run --example measure_learned --release    # base apprise par PCA + INT4 groupé (MX)
+cargo run --example bench_vs_fp16 --release       # SLHA 128 o vs clé bf16 256 o : débit & trafic mémoire
+cargo run --example attention_fidelity --release  # fidélité de la sortie softmax·V (proxy perplexité)
+cargo run --example learn_projection --release    # projection apprise (task-aware) vs PCA
 ```
 
 **Zéro dépendance externe** : le crate compile et se teste entièrement
@@ -46,7 +47,7 @@ faible énergie résiduelle, gains du résidu 1-bit modérés à `d_s = 256`.
 |---|---|
 | `attention/slha_v2.rs` | Tuile `SciRustSlhaTile` (128 o), kernel `compute_score` (scalaire + AVX2), quantification INT4 par groupe (MX) |
 | `linalg.rs` | Décomposition propre symétrique (Jacobi) pour la PCA |
-| `learned.rs` | Projection bas-rang **apprise** par PCA + génération de clés à spectre contrôlable |
+| `learned.rs` | Projection bas-rang : PCA + **SGD task-aware** (`train_projection`) + génération de clés |
 | `scenario.rs` | Projection sign-LSH, génération de contexte à énergie résiduelle `rho` contrôlable |
 | `metrics.rs` | `dot`, Pearson, Spearman, top-k overlap |
 | `rng.rs` | PRNG déterministe (SplitMix64) + échantillonneur gaussien |
@@ -55,3 +56,4 @@ faible énergie résiduelle, gains du résidu 1-bit modérés à `d_s = 256`.
 | `../examples/measure_learned.rs` | Prototype avec base apprise (PCA) + INT4 groupé (MX) |
 | `../examples/bench_vs_fp16.rs` | Débit / trafic mémoire : SLHA (128 o) vs clé bf16 (256 o) |
 | `../examples/attention_fidelity.rs` | Fidélité de la sortie `softmax·V` (proxy de perplexité) |
+| `../examples/learn_projection.rs` | Projection apprise (task-aware) vs PCA |

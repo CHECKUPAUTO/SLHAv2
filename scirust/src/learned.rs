@@ -107,6 +107,31 @@ impl LearnedModel {
         }
     }
 
+    /// Build a model from an arbitrary (e.g. SGD-learned) projection `p`
+    /// (`D_C × d`, row-major), with no per-component whitening. `Z` is seeded
+    /// like [`Self::fit`], so two models built with the same `seed` share the
+    /// residual projection and differ only in `P`.
+    pub fn from_projection(p: Vec<f32>, d: usize, seed: u64) -> Self {
+        assert_eq!(p.len(), D_C * d, "projection must be D_C×d");
+        let mut rng = Rng::new(seed);
+        let mut z = vec![0.0f32; D_S * d];
+        rng.fill_gaussian(&mut z);
+        LearnedModel {
+            d,
+            evec: p,
+            scale: vec![1.0f32; D_C],
+            z,
+            captured_energy: f32::NAN, // not the projector of a single covariance
+            whiten: false,
+        }
+    }
+
+    /// The projection matrix `P` (`D_C × d`, row-major) — e.g. to warm-start
+    /// [`train_projection`] from this model's PCA solution.
+    pub fn projection(&self) -> &[f32] {
+        &self.evec
+    }
+
     #[inline]
     fn evec_dot(&self, k: usize, v: &[f32]) -> f32 {
         let row = &self.evec[k * self.d..(k + 1) * self.d];
@@ -238,6 +263,93 @@ pub fn gen_keys(seed: u64, n: usize, d: usize, r: usize, decay: f32, noise: f32)
         keys.push(k);
     }
     keys
+}
+
+/// Train a projection `P` (`D_C × d`) by SGD to minimise the **score** error
+/// `E_{Q,K}[(⟨Q,K⟩ − ⟨PQ,PK⟩)²]` over *independent* query/key samples — a
+/// task-aware objective, unlike PCA which only minimises key reconstruction and
+/// ignores the query distribution.
+///
+/// Gradient (closed form, per sample): with `a = Pq`, `b = Pk`,
+/// `r = ⟨q,k⟩ − ⟨a,b⟩`, then `∂r²/∂P = −2r (b qᵀ + a kᵀ)`.
+///
+/// Returns `(P, loss_history)` (mean per-sample loss per epoch). Warm-start
+/// `init_p` from a PCA fit to measure the task-aware improvement on top of it.
+pub fn train_projection(
+    qs: &[Vec<f32>],
+    ks: &[Vec<f32>],
+    init_p: Vec<f32>,
+    epochs: usize,
+    lr: f32,
+    batch: usize,
+    seed: u64,
+) -> (Vec<f32>, Vec<f32>) {
+    assert!(
+        init_p.len().is_multiple_of(D_C),
+        "projection must be D_C×d (row-major)"
+    );
+    let d = init_p.len() / D_C;
+    let mut p = init_p;
+    let mut rng = Rng::new(seed);
+    let (nq, nk) = (qs.len(), ks.len());
+    let mut a = vec![0.0f32; D_C];
+    let mut b = vec![0.0f32; D_C];
+    let mut grad = vec![0.0f32; D_C * d];
+    let steps = (nq.max(nk) / batch).max(1);
+    let mut history = Vec::with_capacity(epochs);
+
+    for ep in 0..epochs {
+        // Linear learning-rate decay to 0 — stabilises the late epochs of this
+        // non-convex (quartic-in-P) objective.
+        let cur_lr = lr * (1.0 - ep as f32 / epochs as f32);
+        let mut epoch_loss = 0.0f64;
+        for _ in 0..steps {
+            for g in grad.iter_mut() {
+                *g = 0.0;
+            }
+            let mut batch_loss = 0.0f32;
+            for _ in 0..batch {
+                let q = &qs[(rng.next_u64() as usize) % nq];
+                let k = &ks[(rng.next_u64() as usize) % nk];
+                let mut qk = 0.0f32;
+                for j in 0..d {
+                    qk += q[j] * k[j];
+                }
+                for row in 0..D_C {
+                    let pr = &p[row * d..(row + 1) * d];
+                    let mut sa = 0.0f32;
+                    let mut sb = 0.0f32;
+                    for j in 0..d {
+                        sa += pr[j] * q[j];
+                        sb += pr[j] * k[j];
+                    }
+                    a[row] = sa;
+                    b[row] = sb;
+                }
+                let mut ab = 0.0f32;
+                for row in 0..D_C {
+                    ab += a[row] * b[row];
+                }
+                let r = qk - ab;
+                batch_loss += r * r;
+                let c = -2.0 * r;
+                for row in 0..D_C {
+                    let gr = &mut grad[row * d..(row + 1) * d];
+                    let (ai, bi) = (a[row], b[row]);
+                    for j in 0..d {
+                        gr[j] += c * (bi * q[j] + ai * k[j]);
+                    }
+                }
+            }
+            let step = cur_lr / batch as f32;
+            for (pi, gi) in p.iter_mut().zip(&grad) {
+                *pi -= step * gi;
+            }
+            epoch_loss += batch_loss as f64;
+        }
+        history.push((epoch_loss / (steps * batch) as f64) as f32);
+    }
+    (p, history)
 }
 
 #[cfg(test)]
@@ -391,5 +503,41 @@ mod tests {
         let cw = cosine(&ot, &agg(&s_warm));
         assert!(ch > 0.9, "HOT attention-output cosine {ch} too low");
         assert!(ch + 0.02 >= cw, "HOT {ch} < WARM {cw}");
+    }
+
+    #[test]
+    fn train_projection_reduces_score_loss() {
+        // Optimiser sanity: from a deliberately bad (random) projection, the
+        // task-aware SGD must substantially reduce E[(⟨Q,K⟩ − ⟨PQ,PK⟩)²].
+        // (The decisive "learned beats PCA" result — ~0.16 vs ~0.86 WARM
+        // Spearman on clean data — is shown by the `learn_projection` example.)
+        let d = 160;
+        let gen = |seed: u64, n: usize| -> Vec<Vec<f32>> {
+            let mut rng = Rng::new(seed);
+            (0..n)
+                .map(|_| {
+                    let mut v = vec![0.0f32; d];
+                    rng.fill_gaussian(&mut v);
+                    v
+                })
+                .collect()
+        };
+        let qs = gen(1, 256);
+        let ks = gen(2, 256);
+
+        let mut rng = Rng::new(3);
+        let mut p = vec![0.0f32; D_C * d];
+        for x in p.iter_mut() {
+            *x = rng.next_gaussian() * 0.05; // deliberately poor starting point
+        }
+
+        // Kept light (it runs in debug under CI); a wrong-sign / no-op gradient
+        // would fail this even with a lenient threshold.
+        let (_p, hist) = train_projection(&qs, &ks, p, 40, 2.0e-3, 64, 7);
+        let (l0, l1) = (hist[0], hist[hist.len() - 1]);
+        assert!(
+            l1 < 0.85 * l0,
+            "score loss {l0:.2} -> {l1:.2} did not drop enough"
+        );
     }
 }

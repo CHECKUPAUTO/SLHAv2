@@ -368,7 +368,22 @@ Le ranking des scores (§7.2/7.3) est un proxy ; ce qu'un modèle consomme réel
 
 **C'est le résultat le plus important du §7.** La sortie d'attention est **bien plus robuste** que le ranking ne le laissait craindre : là où le Spearman des scores plafonnait à 0,79–0,90 (§7.3), le **cosinus de la sortie atteint 0,95–0,997**. Raison : le softmax moyenne les valeurs, donc les erreurs de score entre jetons de poids voisins se compensent. C'est la métrique la plus proche de la perplexité accessible hors LLM, et elle est nettement favorable. HOT ≥ WARM partout (écart faible à ces forts `decay`, où le résidu compte peu).
 
-**Conclusion partielle.** Le mécanisme est **mathématiquement correct** (tests, dont les équivalences scalaire/AVX2) et **directionnellement validé** : HOT ≥ WARM, Soft-Paging quasi sans perte à faible `rho`, SIMD ×13, **~2,5× de tokens/s vs bf16** (§7.5), et surtout une **sortie d'attention à cosinus 0,95–0,997** malgré des scores plus bruités (§7.6) — le softmax absorbe l'essentiel de l'erreur. Bémols : (1) le goulot de fidélité du *score* devient l'**INT4 du latent** ; (2) le résidu 1-bit reste **modéré** à `d_s = 256`. Pistes : INT8 / NF4, `d_s` plus grand, projections apprises de bout en bout.
+### 7.7 Projection apprise *task-aware* vs PCA
+
+La PCA choisit les directions de plus forte variance des **clés** — elle ignore la distribution des **requêtes**. Quand Q et K privilégient des sous-espaces différents, une projection entraînée à préserver le **score** `⟨Q,K⟩` (et non la reconstruction des clés) bat la PCA. `train_projection` réalise cette descente de gradient, avec un gradient en **forme close** : `a = PQ`, `b = PK`, `r = ⟨Q,K⟩ − ⟨a,b⟩`, `∂r²/∂P = −2r(b Qᵀ + a Kᵀ)`.
+
+`learn_projection` confronte PCA et projection apprise sur un cas adverse : base de facteurs **orthonormés**, moitié A à forte variance-clé mais faible poids-requête, moitié B l'inverse. La PCA remplit son budget rang-128 avec A et **rate le score, qui vit dans B**. On évalue en **WARM** (coarse seul) pour isoler la projection du résidu.
+
+| Projection | WARM Spearman | HOT Spearman | sortie cosinus |
+|---|---|---|---|
+| PCA | 0,161 | 0,325 | 0,947 |
+| **Apprise** | **0,859** | **0,863** | **0,985** |
+
+(SGD : perte de score **28,8 → 5,1**, descente lisse avec décroissance linéaire du lr.)
+
+**Réponse à la question ouverte : oui, l'apprentissage bat nettement la PCA** (WARM 0,86 vs 0,16) lorsque Q et K diffèrent — la projection task-aware réalloue la capacité bas-rang vers les directions qui comptent pour le score. **Réserves :** données synthétiques à décalage Q/K délibéré ; quand Q et K partagent la même statistique, la PCA est déjà (quasi-)optimale pour le score (rien à gagner) ; et c'est une preuve de concept SGD sur `P` seule, pas un entraînement conjoint avec un vrai modèle.
+
+**Conclusion partielle.** Le mécanisme est **mathématiquement correct** (tests, dont les équivalences scalaire/AVX2) et **directionnellement validé** : HOT ≥ WARM, Soft-Paging quasi sans perte à faible `rho`, SIMD ×13, **~2,5× de tokens/s vs bf16** (§7.5), **sortie d'attention à cosinus 0,95–0,997** (§7.6), et une **projection apprise qui bat la PCA** sous décalage Q/K (§7.7). Bémols : (1) le goulot de fidélité du *score* devient l'**INT4 du latent** ; (2) le résidu 1-bit reste **modéré** à `d_s = 256`. Pistes : INT8 / NF4, `d_s` plus grand, et entraînement conjoint des projections avec un vrai modèle.
 
 ---
 
@@ -376,7 +391,7 @@ Le ranking des scores (§7.2/7.3) est un proxy ; ce qu'un modèle consomme réel
 
 SLHA v2 **propose** qu'en mariant la rigueur d'un système d'exploitation gérant sa mémoire au bit près (CCOS) avec des abstractions mathématiques appliquées aux limites physiques du silicium (SciRust), l'inférence locale puisse changer de paradigme : le cache KV cesserait d'être un fardeau monolithique pour devenir une structure fluide, résiliente et consciente de l'architecture qui l'héberge.
 
-**Cette spécification (v1) progresse vers la validation.** Le crate `scirust` est compilable et testé (§5.1), deux bancs reproductibles existent, un chemin **AVX2** (×13, §7.4) accélère le kernel, et les résultats (§7) confirment la correction du mécanisme et la viabilité du Soft-Paging. Le point dur révélé par la mesure : avec une base bas-rang *apprise*, le goulot de fidélité devient l'**INT4 du latent** — et le groupage MX (déjà en place) ne le lève pas, car le plafond est la résolution 4 bits (§7.3). Restent à faire : (1) une **résolution latente plus large** (INT8 / NF4) et l'extension SIMD à **AVX-512** (AVX2 et NEON déjà en place) ; (2) la validation **matérielle complète** du §6 (compteurs de cache via `perf`, perplexité d'un vrai modèle) — déjà amorcée au niveau kernel en §7.5 ; (3) l'**apprentissage de bout en bout** des projections `W_down`/`W_up`.
+**Cette spécification (v1) progresse vers la validation.** Le crate `scirust` est compilable et testé (§5.1), deux bancs reproductibles existent, un chemin **AVX2** (×13, §7.4) accélère le kernel, et les résultats (§7) confirment la correction du mécanisme et la viabilité du Soft-Paging. Le point dur révélé par la mesure : avec une base bas-rang *apprise*, le goulot de fidélité devient l'**INT4 du latent** — et le groupage MX (déjà en place) ne le lève pas, car le plafond est la résolution 4 bits (§7.3). Restent à faire : (1) une **résolution latente plus large** (INT8 / NF4) et l'extension SIMD à **AVX-512** (AVX2 et NEON déjà en place) ; (2) la validation **matérielle complète** du §6 (compteurs de cache via `perf`, perplexité d'un vrai modèle) — déjà amorcée au niveau kernel en §7.5 ; (3) l'**entraînement conjoint** des projections avec un vrai modèle — le §7.7 en établit le principe (une projection apprise sur le score bat la PCA).
 
 ---
 
