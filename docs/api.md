@@ -1,443 +1,170 @@
-# SLHA v2 API Reference
+# SLHA v2 — API Reference
 
-## Overview
+Référence de l'API **réelle** du crate `scirust` (vérifiée contre le code et les
+tests). Pour la spécification et les mesures, voir [`../SLHAv2.md`](../SLHAv2.md)
+et [`../FINDINGS.md`](../FINDINGS.md).
 
-SLHA v2 (Sub-Low Rank Hybrid Attention v2) is a hardware-optimized attention scorer for LLM inference on CPU. It combines asymmetric attention mechanisms with memory-bandwidth aware tiling to achieve high performance in cache-constrained environments.
+> ⚠️ Une version antérieure de ce fichier décrivait une API inexistante
+> (`new`, `score_safe`, `enforce_paging`, `TileState`, `TileError`, …) et une
+> tuile de « 104 octets ». **C'est faux** : voir l'API ci-dessous (tuile de
+> **128 octets**, score via `compute_score`). Corrigé.
 
-## Table of Contents
+## Modules (`scirust::…`)
 
-- [Modules](#modules)
-- [Core Structures](#core-structures)
-- [Methods](#methods)
-- [Error Handling](#error-handling)
-- [Feature Matrix](#feature-matrix)
-- [Performance Characteristics](#performance-characteristics)
-- [Usage Examples](#usage-examples)
+| Module | Rôle |
+|---|---|
+| `attention::slha_v2` | Tuile + kernel de score fusionné (eq. 2.3), quantizers INT4/NF4 |
+| `metrics` | `dot`, `cosine`, `rel_l2`, `pearson`, `spearman`, `topk_overlap`, `rms`, `softmax_into` |
+| `rng` | PRNG déterministe `Rng` (SplitMix64) + gaussien |
+| `linalg` | `jacobi_eigh` (décomposition propre symétrique, pour la PCA) |
+| `learned` | `LearnedModel` (PCA + SGD task-aware), `train_projection`, `gen_keys` |
+| `scenario` | `Projection` (sign-LSH), `build_tile`, `generate` (données synthétiques) |
 
-## Modules
-
-### `scirust::attention::slha_v2`
-
-Primary module containing the SLHA v2 attention scorer implementation.
-
-## Core Structures
-
-### `pub struct SciRustSlhaTile`
-
-A 104-byte tile containing one context token's compressed key/value representation.
-
-**Memory layout:** 64 bytes latent + 32 bytes residual bitmap + 8 bytes metadata
+## Constantes (`attention::slha_v2`)
 
 ```rust
+pub const D_C: usize = 128;            // dim latente (INT4)
+pub const D_S: usize = 256;            // bits de résidu sign-LSH
+pub const LATENT_BYTES: usize = 64;    // D_C / 2
+pub const RESIDUAL_WORDS: usize = 4;   // D_S / 64
+pub const N_GROUPS: usize = 8;         // groupes de micro-échelles
+pub const GROUP_DIM: usize = 16;       // D_C / N_GROUPS
+
+pub const FLAG_HOT: u16 = 0;           // tuile complète (latent + résidu)
+pub const FLAG_WARM: u16 = 1 << 0;     // résidu paginé : score = latent seul
+pub const FLAG_NF4: u16 = 1 << 1;      // latent codé en NF4 (sinon INT4 uniforme)
+
+pub const NF4_CODEBOOK: [f32; 16];     // 16 quantiles N(0,1) normalisés à [-1, 1]
+```
+
+## `SciRustSlhaTile` — **128 octets, align 64, zéro padding**
+
+```rust
+#[repr(C, align(64))]
 pub struct SciRustSlhaTile {
-    /// Compressed latent space: 128 dimensions encoded as 4-bit nibbles (64 bytes)
-    /// Convention: low nibble (bits 0-3) = even dimension, high nibble (bits 4-7) = odd dimension
-    pub latent_kv: [u8; 64],
-    /// Johnson-Lindenstrauss binary residual bitmap: 256 bits (32 bytes)
-    pub residual_bitmap: [u64; 4],
-    /// Scale factor for the low-rank quantization dequantization
-    pub scale: f32,
-    /// Dynamic binary correction factor: λ = σ_E · √(π / (2 · d_s))
-    pub dynamic_lambda: f32,
+    pub latent_kv: [u8; 64],          // 64  base h_KV : 128 dims en INT4/NF4 (2/octet)
+    pub residual_bitmap: [u64; 4],    // 32  résidu sign-LSH (256 bits)
+    pub scale: f32,                   //  4  échelle globale de déquantification
+    pub dynamic_lambda: f32,          //  4  poids de correction binaire λ (eq. 3.2)
+    pub residual_sigma: f32,          //  4  σ_E par tuile (recalibrage de λ)
+    pub token_id: u32,                //  4
+    pub position: u32,                //  4
+    pub head_id: u16,                 //  2
+    pub flags: u16,                   //  2  HOT / WARM / NF4
+    pub group_scales: [u8; 8],        //  8  micro-échelles MX : eff(g) = scale·gs[g]/255
 }
 ```
 
-#### Fields
+Le test `tile_is_exactly_128_bytes_zero_padding` vérifie `size_of == 128`,
+`align_of == 64`, et l'absence de padding.
 
-- `latent_kv: [u8; 64]`
-  - 128 dimensions packed as 64 bytes of 4-bit nibbles
-  - Convention: nibble bas (bits 0-3) = dimension paire (i×2)
-  - Convention: nibble haut (bits 4-7) = dimension impaire (i×2+1)
-  - Centrage signé : nibbles [0, 15] → [-7, +8] après décalage de 7
-
-- `residual_bitmap: [u64; 4]`
-  - 256-bit Johnson-Lindenstrauss residual vector
-  - Stocké sous forme de 4 mots de 64 bits
-  - Utilisé pour correction binaire Hamming distance
-
-- `scale: f32`
-  - Facteur d'échelle pour déquantification bas-rang
-  - Multiplie les valeurs de nibbles centrés
-
-- `dynamic_lambda: f32`
-  - Facteur de correction binaire dynamique calculé analytiquement
-  - Équation : λ = σ_E · √(π / (2 · d_s))
-
-#### Constants
-
-- `const DS: f32 = 256.0` — Dimension du bitmap résiduel (d_s)
-- `const NIBBLE_CENTER: i8 = 7` — Centrage pour quantification 4-bit signée
-
-### `pub enum TileState`
-
-Memory states for context tiles orchestrated by CCOS soft-paging.
+### Méthodes
 
 ```rust
-pub enum TileState {
-    /// Full tile (latent + residual) in active cache. Maximum fidelity.
-    Hot,
-    /// Residual bitmap released; only latent 4-bit remains. ~30% space savings.
-    Warm,
-    /// Tile evicted entirely from active memory. Trace preserved in EventLog.
-    Cold,
+impl SciRustSlhaTile {
+    pub fn is_warm(&self) -> bool;     // résidu paginé ?
+    pub fn is_nf4(&self) -> bool;      // latent en NF4 ?
+    pub fn group_scale(&self, d: usize) -> f32;   // scale·gs[d/16]/255
+    pub fn dequant_at(&self, d: usize) -> f32;     // (nibble−8)·eff (INT4) ou NF4[nibble]·eff
+    pub fn dequant_latent(&self) -> [f32; 128];
+
+    /// Score fusionné (eq. 2.3) :
+    ///   <q_coarse, dequant(latent)> + λ·(d_s − 2·popcount(q_sign ⊕ B))
+    /// Dispatch runtime : AVX-512 > AVX2 > scalaire (x86_64), NEON (aarch64).
+    /// Les tuiles NF4 passent par le chemin scalaire. En WARM, le terme binaire
+    /// est supprimé.
+    pub fn compute_score(&self, q_coarse: &[f32; 128], q_sign: &[u64; 4]) -> f32;
+
+    pub fn compute_score_scalar(&self, q_coarse: &[f32; 128], q_sign: &[u64; 4]) -> f32;
+
+    #[cfg(target_arch = "x86_64")]  // # Safety: nécessite la feature CPU correspondante
+    pub unsafe fn compute_score_avx2(&self,  q_coarse: &[f32; 128], q_sign: &[u64; 4]) -> f32;
+    #[cfg(target_arch = "x86_64")]
+    pub unsafe fn compute_score_avx512(&self, q_coarse: &[f32; 128], q_sign: &[u64; 4]) -> f32;
+    // (aarch64) compute_score_neon : interne, appelée par le dispatcher.
 }
 ```
 
-#### Variants
+> Il n'y a **pas** de constructeur `new`, de `score_safe`/`Result`, ni
+> d'`enforce_paging`/`TileState`. Une tuile se construit par littéral de struct
+> (cf. exemple) ou via `learned::LearnedModel::encode` / `scenario::build_tile`.
+> Pour passer en WARM : `tile.flags |= FLAG_WARM`.
 
-- `Hot` — Tuile complète active dans L1/L2 cache
-- `Warm` — Bitmap résiduel libéré, latents 4-bit uniquement
-- `Cold` — Évincée de la mémoire active, trace dans EventLog
-
-### `pub enum TileError`
-
-Errors that can occur during tile operations.
+## Quantizers (`attention::slha_v2`)
 
 ```rust
-pub enum TileError {
-    /// A null pointer was passed where a valid pointer is required.
-    NullPointer,
-    /// The query vector length does not match the expected dimension (128).
-    InvalidQueryDimension,
-}
+// INT4 uniforme signé, une échelle globale. value ≈ (nibble−8)·scale.
+pub fn quantize_latent(v: &[f32; 128]) -> ([u8; 64], f32);
+
+// INT4 « micro-scaling » : une échelle par groupe de 16 dims (dans group_scales).
+pub fn quantize_latent_grouped(v: &[f32; 128]) -> ([u8; 64], f32, [u8; 8]);
+
+// NF4 (codebook normal) par groupe — même tuile, flag FLAG_NF4 requis au scoring.
+pub fn quantize_latent_nf4(v: &[f32; 128]) -> ([u8; 64], f32, [u8; 8]);
 ```
 
-## Methods
+`LatentCodec { Int4Single, Int4Grouped, Nf4 }` sélectionne le codec via
+`LearnedModel::encode_with(key, pos, warm, codec)`.
 
-### `impl SciRustSlhaTile`
+## Features Cargo
 
-#### Associated Functions
+Le crate **n'a pas** de features gating la compilation des chemins SIMD : la
+sélection est **à l'exécution** (`std::is_x86_feature_detected!`), avec repli
+scalaire portable. (Les anciennes features `avx2/popcnt/neon = []` étaient des
+no-op trompeuses — supprimées.) La bibliothèque est **sans dépendance** ;
+`criterion` n'est qu'une dev-dependency pour `cargo bench`.
 
-##### `pub fn new(latent_kv, residual_bitmap, scale, dynamic_lambda) -> Self`
+## Performance (mesurée, x86_64 Xeon, banc partagé)
 
-Creates a new SLHA tile from raw components.
+| Chemin | Débit (1024 tuiles) | Rapport |
+|---|---|---|
+| Scalaire | ~3,0 M scores/s | 1× |
+| AVX2 | ~34–38 M scores/s | ~×11,5 |
+| AVX-512 | ~40–42 M scores/s | ~×14,1 |
+
+- **Mémoire :** tuile 128 o/token contre 256 o pour une clé bf16 → **~2,5×**
+  plus de tokens/s à débit comparable (§7.5).
+- **Fidélité :** la sortie d'attention (`softmax·V`) reste à **cosinus
+  0,95–0,997** vs FP malgré un score approché (§7.6).
+
+(Voir `SLHAv2.md` §7 pour la méthodologie et les réserves — projections
+synthétiques, `perf`/perplexité hors banc.)
+
+## Exemple minimal
 
 ```rust
-pub fn new(
-    latent_kv: [u8; 64],
-    residual_bitmap: [u64; 4],
-    scale: f32,
-    dynamic_lambda: f32,
-) -> Self
-```
+use scirust::attention::slha_v2::{quantize_latent, SciRustSlhaTile, FLAG_HOT};
 
-**Arguments:**
+let mut v = [0.0f32; 128];
+for (i, x) in v.iter_mut().enumerate() { *x = ((i as f32) - 64.0) / 16.0; }
+let (latent_kv, scale) = quantize_latent(&v);
 
-- `latent_kv` - 128 dimensions packées comme 64 octets de nibbles 4-bit
-- `residual_bitmap` - 256-bit Johnson-Lindenstrauss residual
-- `scale` - Facteur d'échelle pour déquantification
-- `dynamic_lambda` - Facteur de correction binaire
-
-**Returns:** A new `SciRustSlhaTile` instance
-
-#### Instance Methods
-
-##### `pub fn enforce_paging(&mut self) -> ()`
-
-Transitions a tile from HOT to WARM state by zeroing the residual bitmap.
-
-```rust
-pub fn enforce_paging(&mut self) {
-    self.residual_bitmap = [0u64; 4];
-    self.dynamic_lambda = 0.0;
-}
-```
-
-**Description:** This is the CCOS `enforce_paging()` operation: no I/O, just une écriture de 36 octets.
-
-##### `pub fn state(&self) -> TileState`
-
-Returns the current memory state of the tile.
-
-```rust
-pub fn state(&self) -> TileState {
-    if self.residual_bitmap == [0u64; 4] && self.dynamic_lambda == 0.0 {
-        TileState::Warm
-    } else {
-        TileState::Hot
-    }
-}
-```
-
-**Returns:** Current `TileState` (Hot/Warm/Cold)
-
-##### `pub fn score_safe(&self, q_coarse: &[f32], q_residual_sign: &[u64; 4]) -> Result<f32, TileError>`
-
-Safe wrapper for computing the attention score with error checking.
-
-```rust
-pub fn score_safe(
-    &self,
-    q_coarse: &[f32],
-    q_residual_sign: &[u64; 4],
-) -> Result<f32, TileError>
-```
-
-**Arguments:**
-
-- `q_coarse` - Slice de requête Q * W_up (128 dimensions)
-- `q_residual_sign` - Signe de requête packé sur 4 mots de 64 bits
-
-**Returns:** `Ok(f32)` avec le score calculé, `Err(TileError)` sur échec de validation
-
-**Errors:**
-
-- `InvalidQueryDimension` — si `q_coarse.len() < 128`
-
-##### `pub unsafe fn compute_tile_score_unchecked(&self, q_coarse: *const f32, q_residual_sign: *const u64) -> f32`
-
-Computes the asymmetric attention score against a query.
-
-```rust
-pub unsafe fn compute_tile_score_unchecked(
-    &self,
-    q_coarse: *const f32,
-    q_residual_sign: *const u64,
-) -> f32
-```
-
-**Arguments:**
-
-- `q_coarse` - Pointeur vers au moins 128 f32 contigus (128-dim query vector)
-- `q_residual_sign` - Pointeur vers au moins 4 u64 contigus (256-bit residual)
-
-**Returns:** The asymmetric attention score
-
-**Safety:**
-
-- Both pointers must be non-null, aligned, and valid for reads
-- Requires `popcnt` CPU feature on x86_64; AVX2 enables fast path
-
-## Feature Matrix
-
-### Platform Support
-
-| Target | Default Features | AVX2 | NEON | POPCNT |
-|--------|------------------|------|------|--------|
-| x86_64 | `avx2`, `popcnt` | ✅ | ✗ | ✅ |
-| aarch64 | `neon`, `popcnt` | ✗ | ✅ | ✅ |
-
-### Feature Flags (Cargo.toml)
-
-```toml
-[dependencies]
-scirust = { git = "https://github.com/CHECKUPAUTO/SLHAv2" }
-
-[features]
-default = ["avx2", "popcnt", "neon"]
-avx2 = []
-popcnt = []
-neon = []
-```
-
-## Performance Characteristics
-
-### Benchmark Results (Target: x86_64-unknown-linux-gnu)
-
-| Operation | Time (ns) | Description |
-|-----------|-----------|-------------|
-| `compute_tile_score` | 120.0 | Unsafe kernel (AVX2 optimized) |
-| `compute_tile_score_safe` | 160.0 | Safe wrapper (validation + error handling) |
-| `enforce_paging` | 14.0 | HOT→WARM state transition |
-| `score_safe` | 152.0 | Benchmark safe API (validation + unsafe kernel) |
-
-### Performance by Architecture
-
-| Architecture | Mode | Time (ns) | Speedup |
-|-------------|------|-----------|---------|
-| x86_64 (AVX2) | Unsafe | 120 | Baseline |
-| x86_64 (AVX2) | Safe | 160 | 0.75× |
-| aarch64 (NEON) | Unsafe | 140 | 0.86× |
-| aarch64 (scalar) | Unsafe | 180 | 0.67× |
-
-### Memory Usage
-
-| Component | Size | Location |
-|-----------|------|----------|
-| Tile (SLHA v2) | 104 bytes | Stack or L1 cache |
-| Latent vector (coarse) | 128 f32 | Registre ou cache L1 |
-| Residual bitmap | 256 bits | Registre ou cache L1 |
-
-### Throughput
-
-- **Streaming mode** : 8.3 millions de scores par seconde (x86_64 AVX2)
-- **Batch processing** : Jusqu'à 1024 jetons en parallèle (si pipeline externe)
-- **Cache efficiency** : 95% hits pour tuilage séquentiel
-
-## Usage Examples
-
-### Basic Usage
-
-```rust
-use scirust::attention::slha_v2::SciRustSlhaTile;
-
-// Create a tile with sample data
-let mut latent = [0u8; 64];
-latent[0] = 0x77; // dim0=0, dim1=0 (centered)
-latent[1] = 0x88; // dim2=1, dim3=1 (centered)
-
-let tile = SciRustSlhaTile::new(
-    latent,
-    [0x1234_5678_9ABC_DEF0u64; 4], // residual bitmap
-    1.0f32,                        // scale
-    0.5f32,                        // lambda
-);
-```
-
-### Safe API
-
-```rust
-let mut q_coarse = vec![0.0f32; 128];
-q_coarse[2] = 3.0; // influence la dimension 2
-
-let q_residual = [0u64; 4];
-
-match tile.score_safe(&q_coarse, &q_residual) {
-    Ok(score) => println!("Score: {}", score),
-    Err(e) => eprintln!("Erreur de calcul du score : {:?}", e),
-}
-```
-
-### Unsafe API (performance maximale)
-
-```rust
-let mut q_coarse = [0.0f32; 128];
-q_coarse[0] = 1.0;
-q_coarse[1] = 1.0;
-
-let q_residual = [0u64; 4];
-
-let score = unsafe {
-    tile.compute_tile_score_unchecked(q_coarse.as_ptr(), q_residual.as_ptr())
+let tile = SciRustSlhaTile {
+    latent_kv,
+    residual_bitmap: [0; 4],
+    scale,
+    dynamic_lambda: 0.5,
+    residual_sigma: 0.0,
+    token_id: 0, position: 0, head_id: 0,
+    flags: FLAG_HOT,
+    group_scales: [255; 8], // [255;8] == échelle unique (équiv. INT4 simple)
 };
 
-println!("Score de performance : {}", score);
+let q_coarse = [0.0f32; 128];
+let q_sign = [0u64; 4];
+let score = tile.compute_score(&q_coarse, &q_sign); // dispatch SIMD auto
 ```
 
-### CCOS Integration Example
+Voir aussi `scirust/examples/basic_usage.rs` (exemple exécutable identique).
 
-```rust
-fn process_context_batch(tiles: &mut [SciRustSlhaTile], queries: &[Vec<f32>; 1024]) {
-    for (tile, q) in tiles.iter_mut().zip(queries.iter()) {
-        match tile.state() {
-            TileState::Hot => {
-                // Calculer score complet avec résidu 1-bit
-                let score = unsafe {
-                    tile.compute_tile_score_unchecked(q.as_ptr(), &tile.residual_bitmap.as_ptr())
-                };
-                println!("HOT tile score : {}", score);
-            }
-            TileState::Warm => {
-                // Mode basse-fidélité, seule la composante latente
-                let coarse_score = tile.dequant_coarse(q.as_ptr());
-                println!("WARM tile coarse score : {}", coarse_score);
-            }
-            TileState::Cold => {
-                // Charger depuis EventLog (implémentation dépendante de CCOS)
-                let cold_tile = load_from_event_log(tile.id);
-                let score = cold_tile.score_safe(q, &cold_tile.residual_bitmap).unwrap();
-                println!("COLD tile score : {}", score);
-            }
-        }
-    }
-}
+## Build / test / bench (depuis la racine, workspace)
 
-fn main() {
-    let mut tile_pool = vec![
-        SciRustSlhaTile::new([0u8; 64], [0u64; 4], 1.0, 0.5),
-        // ... plus de tuiles
-    ];
-    
-    // Simuler flux de requête
-    let query_stream: Vec<Vec<f32>> = (0..1024)
-        .map(|i| vec![(i as f32) * 0.01; 128])
-        .collect();
-    
-    process_context_batch(&mut tile_pool, &query_stream);
-}
+```sh
+cargo test                 # 30 tests (unitaires + intégration + property/fuzz + doctests)
+cargo bench                # micro-benchs criterion (scalaire / AVX2 / AVX-512)
+cargo run -p scirust --example basic_usage
+cargo build --workspace --all-targets   # compile lib + tests + benches + exemples
 ```
-
-### Performance Comparison
-
-```rust
-use std::time::Instant;
-
-fn benchmark_mode() {
-    let tile = SciRustSlhaTile::new([0u8; 64], [0u64; 4], 1.0, 0.5);
-    let q_coarse = vec![0.0f32; 128];
-    let q_residual = [0u64; 4];
-    
-    // Benchmark unsafe API
-    let start = Instant::now();
-    for _ in 0..10000 {
-        let _score = unsafe { tile.compute_tile_score_unchecked(q_coarse.as_ptr(), q_residual.as_ptr()) };
-    }
-    let unsafe_time = start.elapsed();
-    
-    // Benchmark safe API
-    let start = Instant::now();
-    for _ in 0..10000 {
-        let _score = tile.score_safe(&q_coarse, &q_residual).unwrap();
-    }
-    let safe_time = start.elapsed();
-    
-    println!("Temps unsafe : {:?}", unsafe_time);
-    println!("Temps safe : {:?}", safe_time);
-    println!("Overhead safe : {:.1}%", (safe_time.as_nanos() as f64 / unsafe_time.as_nanos() as f64 - 1.0) * 100.0);
-}
-```
-
-## Build and Run
-
-### Installation
-
-```bash
-# Cloner le dépôt
-cargo clone CHECKUPAUTO/SLHAv2
-sd
-cd SLHAv2
-
-# Construire
- cargo build --release
-
-# Tests unitaires
-cargo test --release
-
-# Benchmarks
-cargo bench --release
-```
-
-### Run with specific features
-
-```bash
-# AVX2+POPCNT (défaut sur x86_64)
-cargo run --release --features avx2,popcnt
-
-# NEON uniquement (ARM)
-cargo run --release --features neon
-
-# Version scalaire uniquement (pas d'accélération SIMD)
-cargo run --release --no-default-features
-```
-
-### Documentation
-
-```bash
-# Générer documentation rustdoc
-cargo doc --no-deps --workspace --all-features
-
-# Ouvrir la documentation (Linux/macOS)
-open target/doc/index.html
-
-# Ou inspecter avec un navigateur web
-```
-
-## Support et contributions
-
-Pour les problèmes, les demandes de fonctionnalités ou les contributions, veuillez consulter la documentation principale du projet SLHA v2.
 
 ---
-
-*SLHA v2 — Sub-Low Rank Hybrid Attention v2 — Édition 2026 — Forge CHECKUPAUTO*
-
-Cité dans : SLHAv2.md:107 : "Une tuile complète occupe exactement **104 octets**."
+*SLHA v2 — référence d'API alignée sur le code (`scirust` v0.2.0).*

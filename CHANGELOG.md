@@ -1,32 +1,48 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
+[SemVer](https://semver.org/). Ce fichier décrit l'état **réel** du code.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [0.1.0] - 2026-06-17
-
-### Added
-- Core micro-kernel `SciRustSlhaTile` with 104-byte tile layout
-- AVX2-accelerated XOR for binary residual scoring
-- Hardware POPCNT for Hamming distance computation
-- Scalar fallback for non-AVX2 platforms
-- Signed 4-bit dequantization with centered nibble convention
-- `TileState` enum (Hot/Warm/Cold) for CCOS soft-paging
-- `enforce_paging()` for HOT→WARM state transition
-- `score_safe()` safe wrapper with error handling
-- Compile-time tile size assertion (104 bytes)
-- Unit tests for dequantization, popcount, paging, and edge cases
-- Criterion benchmarks for `compute_tile_score`, `score_safe`, and `enforce_paging`
-- CI workflow (test, clippy, bench)
-- README with quick start guide (English)
-- CHANGELOG
+## [Unreleased]
 
 ### Fixed
-- **Critical**: 4-bit dequantization now centers nibbles `[-7, +8]` instead of unsigned `[0, 15]`
-- Struct layout: `#[repr(C)]` without alignment padding, verified at compile time
-- Removed unused `std::arch::x86_64::*` wildcard import
-- Removed `read_volatile` that prevented compiler optimizations
-- Added `# Safety` documentation on all unsafe functions
-- Added `debug_assert!` null-pointer checks
+- **Doc & packaging.** Remplacement d'un second crate `scirust` déclaré à la
+  racine dont le bench (`benches/score.rs`), la doc (`docs/api.md`) et ce
+  changelog décrivaient une **API inexistante** (`SciRustSlhaTile::new`,
+  `score_safe`, `enforce_paging`, `TileState`/`TileError`) et une tuile de
+  « 104 octets ». La racine est désormais un **workspace Cargo** autour de
+  l'unique crate `scirust` ; `docs/api.md` documente l'**API réelle** (tuile de
+  **128 octets**, score via `compute_score`) ; le bench cassé est supprimé
+  (`scirust/benches/kernel.rs`, fonctionnel, est conservé). Suppression des
+  features `avx2/popcnt/neon = []` no-op (la sélection SIMD est *runtime*).
+
+## [0.2.0] - 2026-06-16
+
+### Added
+- `SciRustSlhaTile` : tuile **128 octets**, alignée 64, **zéro padding** (latent
+  64 o + résidu 32 o + métadonnées 32 o), vérifié par test.
+- `compute_score` (eq. 2.3) avec dispatch à l'exécution **AVX-512 > AVX2 >
+  scalaire** (x86_64) et **NEON** (aarch64) ; équivalences SIMD ≡ scalaire
+  testées (property/fuzz inclus).
+- Codecs latents : INT4 **signé** (zero-point), INT4 **par groupe (MX)**, **NF4**
+  (codebook normal) — même tuile 128 o.
+- Résidu 1-bit sign-LSH + cœur `popcount` (identité de Hamming prouvée vs réf.).
+- `learned` : projection **PCA** (`jacobi_eigh`) et projection **apprise
+  task-aware** par SGD (`train_projection`), qui bat la PCA sous décalage Q/K.
+- Exemples : `measure`, `measure_learned`, `bench_vs_fp16`, `attention_fidelity`,
+  `learn_projection`, `basic_usage`.
+- Tests : unitaires + intégration + **property/fuzz** + **doctests** (30 au total).
+- **criterion** benches (dev-dependency allégée, lib sans dépendance) ; **CI**
+  (fmt + clippy `-D warnings` + tests + benches + cross-compile NEON).
+
+### Fixed (par rapport au paper v1)
+- Tuile : **128 octets** et non « 104 » (`align(64)` arrondit la taille ; vérifié
+  empiriquement `size_of = 128`).
+- Déquantification INT4 **signée** `(nibble − 8)·scale` (et non `[0, 15]·scale`).
+- Retrait du `read_volatile` (qui bloquait la vectorisation) et de l'import /
+  `target_feature(avx2)` trompeurs.
+
+## [0.1.0] - 2026
+
+### Added
+- Spécification SLHA v2 (`SLHAv2.md`) et micro-noyau de référence initial.

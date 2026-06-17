@@ -3,6 +3,12 @@
 Ce guide explique comment brancher SLHA v2 dans **llama.cpp**, **Ollama**,
 **vLLM** ou votre propre moteur d'inférence.
 
+> **Statut : esquisse de conception.** Les sections llama.cpp / Ollama / vLLM
+> sont du **pseudo-code** illustratif — les drapeaux `LLAMA_SLHA`,
+> `--kv-cache=slha`, etc. **n'existent pas encore**. Seule la section « moteur
+> Rust custom » utilise l'API réelle du crate. Aucune de ces intégrations n'a
+> été mesurée sur un vrai modèle.
+
 ---
 
 ## Principe général
@@ -93,7 +99,10 @@ float compute_attention_slha(query, token_idx) {
 4. **Compiler** : `make LLAMA_SLHA=1`
 5. **Tester** : lancer un modèle et comparer la qualité/perplexité
 
-**Gain attendu** : KV-cache 16× plus petit, débit 2-3× supérieur sur CPU.
+**Gain visé** (à mesurer sur un vrai modèle) : KV-cache plusieurs fois plus
+petit (≈16× si l'on remplace un cache K+V FP16 complet). *Mesuré à ce jour*,
+uniquement au niveau kernel : **~2,5× tokens/s** vs une clé bf16, à **2× moins
+d'octets/token** (cf. `SLHAv2.md` §7.5).
 
 ---
 

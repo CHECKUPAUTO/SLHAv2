@@ -7,9 +7,6 @@ on:
 jobs:
   build-test:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: scirust
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -17,12 +14,14 @@ jobs:
           components: rustfmt, clippy
           targets: aarch64-unknown-linux-gnu
       - name: Format
-        run: cargo fmt --check
-      - name: Clippy (warnings = errors)
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Tests (unit + integration + property/fuzz)
-        run: cargo test
+        run: cargo fmt --all --check
+      - name: Clippy (warnings = errors, all targets)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build all targets (lib + tests + benches + examples)
+        run: cargo build --workspace --all-targets
+      - name: Tests (unit + integration + property/fuzz + doctests)
+        run: cargo test --workspace
       - name: Benchmarks compile
-        run: cargo bench --no-run
+        run: cargo bench --workspace --no-run
       - name: NEON path cross-compile check (aarch64)
-        run: cargo build --lib --target aarch64-unknown-linux-gnu
+        run: cargo build -p scirust --lib --target aarch64-unknown-linux-gnu

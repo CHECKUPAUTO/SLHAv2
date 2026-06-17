@@ -30,6 +30,9 @@ d'une ligne de texte — au lieu de plusieurs kilo-octets normalement.
 | Obligé d'avoir un GPU | Fonctionne sur CPU |
 | RAM saturée rapidement | Cache L1/L2/L3 utilisé intelligemment |
 
+> Le dépôt est un **workspace Cargo** : toutes les commandes ci-dessous se
+> lancent depuis la racine.
+
 ---
 
 ## Installation (30 secondes)
@@ -58,7 +61,7 @@ cargo run --example basic_usage
 cargo run --example measure --release
 ```
 
-Sortie typique :
+Sortie de `basic_usage` :
 ```
 Score: -8.000000
 Tile is in HOT mode (full fidelity)
@@ -83,11 +86,12 @@ Puis dans votre code :
 ```rust
 use scirust::attention::slha_v2;
 
-// Compresser un vecteur de clé
+// Compresser un vecteur de clé (128 dims -> 64 octets INT4)
+let mon_vecteur = [0.5f32; 128];
 let (packed, scale) = slha_v2::quantize_latent(&mon_vecteur);
 
-// Créer une tuile compressée
-let tuile = SciRustSlhaTile {
+// Créer une tuile compressée (128 octets)
+let tuile = slha_v2::SciRustSlhaTile {
     latent_kv: packed,
     residual_bitmap: [0u64; 4],
     scale,
@@ -100,13 +104,16 @@ let tuile = SciRustSlhaTile {
     group_scales: [255u8; 8],
 };
 
-// Calculer le score d'attention
-let score = tuile.compute_score(&ma_requete, &ma_signature);
+// Calculer le score d'attention (dispatch SIMD automatique)
+let q_coarse = [0.0f32; 128];
+let q_sign = [0u64; 4];
+let score = tuile.compute_score(&q_coarse, &q_sign);
 ```
 
 ### Intégration avec llama.cpp / Ollama / vLLM
 
-Voir le [guide d'intégration complet](docs/INTEGRATION.md).
+Voir le [guide d'intégration](docs/INTEGRATION.md) — **esquisse de conception**
+(pseudo-code), pas une intégration livrée.
 
 ---
 
@@ -115,34 +122,39 @@ Voir le [guide d'intégration complet](docs/INTEGRATION.md).
 | Document | Pour qui | Contenu |
 |---|---|---|
 | [**Premiers pas**](docs/GETTING_STARTED.md) | Débutants | Installation, premier essai, concepts |
-| [**Guide d'intégration**](docs/INTEGRATION.md) | Développeurs | Brancher SLHA dans llama.cpp, Ollama, vLLM |
-| [**Spécification**](SLHAv2.md) | Chercheurs | Maths complètes du mécanisme |
-| [**Résultats**](FINDINGS.md) | Curieux | Ce qu'on a mesuré, ce qui marche, ce qui reste à faire |
-| [**API Reference**](docs/api.md) | Développeurs | Documentation technique complète |
+| [**Guide d'intégration**](docs/INTEGRATION.md) | Développeurs | Esquisse pour llama.cpp, Ollama, vLLM |
+| [**Spécification**](SLHAv2.md) | Chercheurs | Maths complètes + résultats §7 |
+| [**Résultats**](FINDINGS.md) | Curieux | Ce qu'on a mesuré, ce qui marche, ce qui reste |
+| [**API Reference**](docs/api.md) | Développeurs | Documentation technique (API réelle) |
+| [**Détails du crate**](scirust/README.md) | Développeurs | Organisation de `scirust/` |
 
 ---
 
 ## État du projet
 
-- ✅ **Mécanisme validé** : 13 tests + 3 doctests, clippy clean
-- ✅ **Performance** : AVX2 ~×11,5 plus rapide que le scalaire
-- ✅ **Multi-plateforme** : x86_64 (AVX2/AVX-512) + ARM (NEON)
-- ✅ **Fidélité** : cosinus 0,95-0,997 vs attention complète
-- ✅ **Soft-Paging** : passage HOT→WARM sans perte de qualité
-- ⏳ **Intégration LLM réel** : tests sur vrai modèle à venir
+- ✅ **Mécanisme validé** : **30 tests** (unitaires + intégration + property/fuzz + doctests), clippy `-D warnings` clean, CI
+- ✅ **Performance** : **AVX2 ~×11,5 / AVX-512 ~×14,1** plus rapide que le scalaire
+- ✅ **Multi-plateforme** : x86_64 (AVX2/AVX-512) + ARM (NEON, cross-compilé)
+- ✅ **Fidélité** : cosinus 0,95–0,997 vs attention complète (sortie `softmax·V`)
+- ◑ **Soft-Paging** : HOT→WARM **quasi sans perte à faible énergie résiduelle** (§7)
+- ⏳ **Intégration LLM réel** + perplexité : à venir (hors banc actuel)
+
+> Réserves d'honnêteté (projections synthétiques, `perf`/perplexité hors banc) :
+> voir [`FINDINGS.md`](FINDINGS.md) et `SLHAv2.md` §6–7.
 
 ---
 
 ## Contribuer
 
-Les contributions sont les bienvenues ! Voir les [issues](https://github.com/CHECKUPAUTO/SLHAv2/issues).
+Les contributions sont les bienvenues — voir [`CONTRIBUTING.md`](CONTRIBUTING.md)
+et les [issues](https://github.com/CHECKUPAUTO/SLHAv2/issues).
 
 ```bash
 git clone https://github.com/CHECKUPAUTO/SLHAv2.git
 cd SLHAv2
-cargo test  # doit passer à 100%
-cargo fmt --check
-cargo clippy -- -D warnings
+cargo test                              # 30 tests, doivent passer
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 ---

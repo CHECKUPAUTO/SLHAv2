@@ -126,13 +126,15 @@ cargo run --example bench_vs_fp16 --release
 cargo bench
 ```
 
-Exemple de sortie de `measure` :
+`measure` affiche une table **HOT vs WARM** par énergie résiduelle `rho`, puis le
+débit **scalaire / AVX2 / AVX-512**. Extrait représentatif (chiffres réels) :
 
 ```
-HOT  score Spearman=0.897  top-1=0.420
-WARM score Spearman=0.784  top-1=0.350
-Attention output cosine vs FP: 0.986
-Throughput: 2.4× baseline BF16
+   rho |   HOT Spear   top16 |  WARM Spear   top16
+  0,05 |       0,987   0,875 |       0,987   0,875
+  0,50 |       0,844   0,500 |       0,811   0,438
+
+3) Débit : scalaire ~3 M/s · AVX2 ~34 M/s · AVX-512 ~41 M/s
 ```
 
 ---
