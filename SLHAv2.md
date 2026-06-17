@@ -341,6 +341,8 @@ Le kernel dispose de chemins **AVX2** et **AVX-512** (dispatch à l'exécution v
 
 Le facteur dépasse le 8×/16× « théorique » car le chemin scalaire payait aussi une déquantification INT4 *branchy* que le SIMD fusionne. AVX-512 n'ajoute que **~+23 %** sur AVX2 : le kernel est court (128 dims) et limité surtout par le dénibblage/chargement, pas par la largeur FMA. À traiter comme un ordre de grandeur sur banc partagé. Un **chemin NEON** (aarch64) existe aussi, **vérifié par cross-compilation** mais non chronométré ici (pas de matériel ARM).
 
+**En cycles** (exemple `cycles`, via `rdtsc` ; TSC = cycles de *référence*, pas cycles cœur) : ~**942** cyc/tuile scalaire, ~**89** AVX2, ~**71** AVX-512. Le balayage du working-set montre cyc/tuile ~plat tant que résident (68→71 de 0,25 à 16 Mo) puis **+~19 % à 128 Mo** — débordement cache visible *indirectement* (les compteurs de cache-miss `perf` restent indisponibles, §6.1).
+
 ### 7.5 Trafic mémoire & débit vs une référence bf16 (§6.2, au niveau kernel)
 
 `bench_vs_fp16` compare le scoring d'une tuile SLHA (**128 o/token**) à un produit scalaire sur une clé **bf16** (`d_k·2 = 256` o/token), les deux en AVX2 (le comparatif isole le format mémoire, pas la chance de codegen).

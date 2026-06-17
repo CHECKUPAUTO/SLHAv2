@@ -26,6 +26,7 @@ cargo run --example bench_vs_fp16 --release       # SLHA 128 o vs clé bf16 256 
 cargo run --example attention_fidelity --release  # fidélité de la sortie softmax·V (proxy perplexité)
 cargo run --example learn_projection --release    # projection apprise (task-aware) vs PCA
 cargo run --example calibrate_lambda --release    # calibration de λ (ΔP) vs référence FP
+cargo run --example cycles --release              # cycles/tuile (rdtsc) : scalaire/AVX2/AVX-512
 ```
 
 **Bibliothèque sans dépendance** : la lib n'ajoute rien à l'arbre d'un
@@ -66,4 +67,5 @@ faible énergie résiduelle, gains du résidu 1-bit modérés à `d_s = 256`.
 | `../examples/attention_fidelity.rs` | Fidélité de la sortie `softmax·V` (proxy de perplexité) |
 | `../examples/learn_projection.rs` | Projection apprise (task-aware) vs PCA |
 | `../examples/calibrate_lambda.rs` | Calibration de λ (dérive ΔP) vs référence FP |
+| `../examples/cycles.rs` | Cycles/tuile (TSC via rdtsc) — complète le bench ns |
 | `../tests/calibration.rs` | Test épinglant la calibration de λ (forme + constante) |

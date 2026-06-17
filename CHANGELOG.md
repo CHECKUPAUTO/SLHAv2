@@ -11,6 +11,9 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
   FP de référence. La forme `λ ∝ σ_E` est **validée** (α* stable sur `rho`) ;
   la constante `√(π/(2·d_s))` **sous-pondère ~4,2×** → constante calibrée
   `C_emp ≈ 0,33` (d_s = 256). La formule analytique reste le défaut conservateur.
+- **Coût en cycles** (`examples/cycles.rs`, via `rdtsc`) : ~942 cyc/tuile
+  scalaire, ~89 AVX2, ~71 AVX-512 ; balayage de working-set (signal cache
+  indirect — compteurs `perf` indisponibles). Complète le bench criterion (ns).
 
 ### Fixed
 - **Doc & packaging.** Remplacement d'un second crate `scirust` déclaré à la
