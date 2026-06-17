@@ -160,7 +160,7 @@ Voir aussi `scirust/examples/basic_usage.rs` (exemple exécutable identique).
 ## Build / test / bench (depuis la racine, workspace)
 
 ```sh
-cargo test                 # 30 tests (unitaires + intégration + property/fuzz + doctests)
+cargo test                 # 31 tests (unitaires + intégration + property/fuzz + doctests + calibration λ)
 cargo bench                # micro-benchs criterion (scalaire / AVX2 / AVX-512)
 cargo run -p scirust --example basic_usage
 cargo build --workspace --all-targets   # compile lib + tests + benches + exemples

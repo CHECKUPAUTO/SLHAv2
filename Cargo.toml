@@ -10,3 +10,9 @@ members = ["scirust"]
 # So root-level `cargo build / test / bench / run --example` target the scirust
 # crate without `-p` (the installer, Makefile and demo.sh rely on this).
 default-members = ["scirust"]
+
+# Release profile lives at the workspace root (a member's [profile] is ignored).
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

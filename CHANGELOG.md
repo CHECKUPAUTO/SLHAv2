@@ -5,6 +5,13 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
 
 ## [Unreleased]
 
+### Added
+- **Calibration de λ** (`examples/calibrate_lambda.rs` + test
+  `tests/calibration.rs`, §7.9) : confronte le poids du résidu à une attention
+  FP de référence. La forme `λ ∝ σ_E` est **validée** (α* stable sur `rho`) ;
+  la constante `√(π/(2·d_s))` **sous-pondère ~4,2×** → constante calibrée
+  `C_emp ≈ 0,33` (d_s = 256). La formule analytique reste le défaut conservateur.
+
 ### Fixed
 - **Doc & packaging.** Remplacement d'un second crate `scirust` déclaré à la
   racine dont le bench (`benches/score.rs`), la doc (`docs/api.md`) et ce

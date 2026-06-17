@@ -82,4 +82,4 @@ mesures ont **réellement** établi. Toutes les valeurs sont reproductibles
    bout** (et non au seul niveau kernel).
 
 ---
-*Réf. : crate `scirust/` (30 tests dont property/fuzz + doctests, criterion, CI), paper `SLHAv2.md` §1–8.*
+*Réf. : crate `scirust/` (31 tests dont property/fuzz + doctests + calibration λ, criterion, CI), paper `SLHAv2.md` §1–8.*

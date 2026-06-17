@@ -132,7 +132,7 @@ Voir le [guide d'intégration](docs/INTEGRATION.md) — **esquisse de conception
 
 ## État du projet
 
-- ✅ **Mécanisme validé** : **30 tests** (unitaires + intégration + property/fuzz + doctests), clippy `-D warnings` clean, CI
+- ✅ **Mécanisme validé** : **31 tests** (unitaires + intégration + property/fuzz + doctests + calibration λ), clippy `-D warnings` clean, CI
 - ✅ **Performance** : **AVX2 ~×11,5 / AVX-512 ~×14,1** plus rapide que le scalaire
 - ✅ **Multi-plateforme** : x86_64 (AVX2/AVX-512) + ARM (NEON, cross-compilé)
 - ✅ **Fidélité** : cosinus 0,95–0,997 vs attention complète (sortie `softmax·V`)
@@ -152,7 +152,7 @@ et les [issues](https://github.com/CHECKUPAUTO/SLHAv2/issues).
 ```bash
 git clone https://github.com/CHECKUPAUTO/SLHAv2.git
 cd SLHAv2
-cargo test                              # 30 tests, doivent passer
+cargo test                              # 31 tests, doivent passer
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```

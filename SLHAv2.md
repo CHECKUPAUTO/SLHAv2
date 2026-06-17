@@ -122,7 +122,7 @@ La constante λ, qui régit le poids de la correction binaire, n'est plus fixe. 
 
 Si l'arborescence causale du code (analysée par le parser CCOS) détecte une zone hautement critique (par exemple, une signature de fonction fondamentale), σ_E augmente pour forcer le processeur à sur-pondérer la fidélité binaire.
 
-> **Statut :** cette forme de λ est une **heuristique** de type estimateur sign-LSH — le facteur √(π/2) provient de la relation gaussienne 𝔼[|X|] = σ·√(2/π), et le 1/√d_s normalise la variance d'une somme de d_s termes ±1. Elle est **plausible mais non encore validée empiriquement** ; à confirmer (ou infirmer) via le protocole du §6.
+> **Statut — calibré (§7.9).** La **forme** `λ ∝ σ_E` est **validée empiriquement** : le multiplicateur optimal (moindres carrés vs référence FP) est ~constant sur tout `rho` (`α* ≈ 4,2`). En revanche la **constante** `√(π/(2·d_s)) ≈ 0,078` **sous-pondère** le résidu d'un facteur ~4,2 ; la constante calibrée est **`C_emp ≈ 0,33`** (à `d_s = 256`). Le crate garde la formule analytique comme défaut conservateur ; l'exemple `calibrate_lambda` re-dérive `C` (l'optimum dépend des données/du modèle — cf. §7.8). Détails et tableau au **§7.9**.
 
 ---
 
@@ -399,7 +399,26 @@ Le latent peut être encodé en **NF4** (codebook NormalFloat-4, 16 niveaux aux 
 
 **Constat — et correction du §7.3 :** NF4 réduit l'erreur de reconstruction (test `nf4_beats_uniform_int4_on_gaussian_latent`) mais le gain end-to-end est **nul à marginal** (0,884 → 0,885). Surtout, **INT8 ne fait pas mieux qu'INT4 au WARM (~0,61)** : doubler les bits ne lève pas le plafond du terme coarse. **Le facteur limitant n'est donc PAS la quantification du latent, mais la projection bas-rang elle-même** (la part du score que la PCA laisse au résidu). Cela recadre les leviers réels : **(a)** une meilleure projection (§7.7 : apprise, WARM 0,16 → 0,86) et **(b)** le résidu 1-bit (HOT). NF4 reste utile (meilleure reconstruction, sans coût de tuile), mais n'est pas le levier de fidélité de score.
 
-**Conclusion partielle.** Le mécanisme est **mathématiquement correct** (tests, dont les équivalences scalaire/AVX2) et **directionnellement validé** : HOT ≥ WARM, Soft-Paging quasi sans perte à faible `rho`, SIMD ×13, **~2,5× de tokens/s vs bf16** (§7.5), **sortie d'attention à cosinus 0,95–0,997** (§7.6), et une **projection apprise qui bat la PCA** sous décalage Q/K (§7.7). Le §7.8 corrige une idée reçue : le plafond du *score coarse* tient à la **projection bas-rang**, non à la quantification (NF4 et même INT8 n'y changent rien). Leviers réels : **meilleure projection** et **résidu 1-bit** ; pistes restantes : `d_s` plus grand et entraînement conjoint des projections avec un vrai modèle.
+### 7.9 Calibration de λ (dérive ΔP)
+
+`calibrate_lambda` confronte le poids du résidu `λ` à une attention **FP de référence**. En décomposant `score = coarse + λ·r` (où `r = d_s − 2·popcount` est indépendant de `λ`), le multiplicateur optimal sur la `λ` de la formule a une **forme close** (moindres carrés) : `α* = Σ rt·(λr) / Σ (λr)²`, avec `rt = ⟨Q,K⟩ − coarse`.
+
+| rho | α* (LS) | C_emp = α*·C_formule | RMSE @formule | RMSE @opt | Δout @formule |
+|---|---|---|---|---|---|
+| 0,10 | 4,18 | 0,327 | 1,37 | 1,26 | 0,006 |
+| 0,20 | 4,23 | 0,331 | 2,25 | 1,94 | 0,017 |
+| 0,30 | 4,24 | 0,332 | 3,29 | 2,79 | 0,036 |
+| 0,50 | 4,25 | 0,333 | 5,87 | 4,92 | 0,106 |
+| 0,70 | 4,26 | 0,334 | 9,90 | 8,26 | 0,262 |
+
+**Deux conclusions :**
+
+- **La forme `λ ∝ σ_E` est validée.** `α*` est quasi constant sur tout `rho` (4,18–4,26) : le facteur `σ_E` capture bien la dépendance ; le seul degré de liberté restant est la constante.
+- **La constante est ~4,2× trop petite.** `√(π/(2·d_s)) ≈ 0,078` sous-pondère le résidu ; la constante **calibrée** est **`C_emp ≈ 0,33`** (`d_s = 256`). L'optimiser réduit le RMSE de score (~15 %) et la dérive de sortie au fort `rho`.
+
+**Figer.** La forme est **figée** (validée) ; la constante calibrée est **documentée et épinglée par test** (`lambda_calibration_is_stable_and_pinned`). Le crate **garde la formule analytique par défaut** : le facteur 4,2 est mesuré sur données *synthétiques* à projections aléatoires, et l'optimum réel dépend du modèle (cf. §7.8). `calibrate_lambda` re-dérive `C` par déploiement ; `C ≈ 0,33` est la valeur recommandée une fois validée sur modèle réel.
+
+**Conclusion partielle.** Le mécanisme est **mathématiquement correct** (tests, dont les équivalences scalaire/AVX2) et **directionnellement validé** : HOT ≥ WARM, Soft-Paging quasi sans perte à faible `rho`, SIMD ×13, **~2,5× de tokens/s vs bf16** (§7.5), **sortie d'attention à cosinus 0,95–0,997** (§7.6), **projection apprise > PCA** sous décalage Q/K (§7.7), et **λ calibrée** (forme `∝σ_E` validée, constante corrigée ~4,2× → `C_emp ≈ 0,33`, §7.9). Le §7.8 corrige une idée reçue : le plafond du *score coarse* tient à la **projection bas-rang**, non à la quantification. Leviers réels : **meilleure projection** et **résidu 1-bit** (correctement pondéré une fois `λ` calibrée) ; pistes restantes : `d_s` plus grand et entraînement conjoint avec un vrai modèle.
 
 ---
 

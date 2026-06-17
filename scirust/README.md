@@ -14,9 +14,9 @@ Hybrid Attention) décrit dans [`../SLHAv2.md`](../SLHAv2.md).
 ## Build / test / mesure
 
 ```sh
-cargo test                                       # 30 tests : unitaires + intégration + property/fuzz + doctests
+cargo test                                       # 31 tests : unitaires + intégration + property/fuzz + doctests
                                                  #  (Hamming, layout 128 o, zero-point, WARM, sign-LSH, Jacobi,
-                                                 #   PCA, MX, NF4, sortie d'attention, SGD, SIMD≡scalaire ;
+                                                 #   PCA, MX, NF4, sortie d'attention, SGD, SIMD≡scalaire, calibration λ ;
                                                  #   property : fuzz SIMD≡scalaire, finitude, softmax, bornes dequant,
                                                  #   déterminisme, complément de signe, borne du résidu, codebook NF4)
 cargo bench                                      # micro-benchs criterion (scalaire / AVX2 / AVX-512)
@@ -25,6 +25,7 @@ cargo run --example measure_learned --release    # base apprise par PCA + codecs
 cargo run --example bench_vs_fp16 --release       # SLHA 128 o vs clé bf16 256 o : débit & trafic mémoire
 cargo run --example attention_fidelity --release  # fidélité de la sortie softmax·V (proxy perplexité)
 cargo run --example learn_projection --release    # projection apprise (task-aware) vs PCA
+cargo run --example calibrate_lambda --release    # calibration de λ (ΔP) vs référence FP
 ```
 
 **Bibliothèque sans dépendance** : la lib n'ajoute rien à l'arbre d'un
@@ -64,3 +65,5 @@ faible énergie résiduelle, gains du résidu 1-bit modérés à `d_s = 256`.
 | `../examples/bench_vs_fp16.rs` | Débit / trafic mémoire : SLHA (128 o) vs clé bf16 (256 o) |
 | `../examples/attention_fidelity.rs` | Fidélité de la sortie `softmax·V` (proxy de perplexité) |
 | `../examples/learn_projection.rs` | Projection apprise (task-aware) vs PCA |
+| `../examples/calibrate_lambda.rs` | Calibration de λ (dérive ΔP) vs référence FP |
+| `../tests/calibration.rs` | Test épinglant la calibration de λ (forme + constante) |
