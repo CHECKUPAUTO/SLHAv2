@@ -7,3 +7,6 @@
 [workspace]
 resolver = "2"
 members = ["scirust"]
+# So root-level `cargo build / test / bench / run --example` target the scirust
+# crate without `-p` (the installer, Makefile and demo.sh rely on this).
+default-members = ["scirust"]
