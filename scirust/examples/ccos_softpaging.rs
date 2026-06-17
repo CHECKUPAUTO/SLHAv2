@@ -55,8 +55,9 @@ fn main() {
     );
 
     // --- A) Paging-only budget (no eviction): measure output fidelity ---------
+    // Recommended default policy: hybrid (page by σ_E, evict by age).
     let budget_a = n * 112; // between WARM(96) and HOT(128) totals -> pages, never evicts
-    let mut cache = ElasticKvCache::new(budget_a, PageOutPolicy::LowestImpactFirst);
+    let mut cache = ElasticKvCache::with_budget(budget_a);
     for (i, t) in tiles.iter().enumerate() {
         cache.insert(t.clone());
         if i % 256 == 0 {
@@ -88,6 +89,8 @@ fn main() {
     );
 
     // --- B) Tight budget that forces eviction (→COLD) -------------------------
+    // Pure-causal alternative policy (paging by age); eviction is by age either
+    // way, so under this much pressure the two policies converge.
     let budget_b = n * 40;
     let mut cache_b = ElasticKvCache::new(budget_b, PageOutPolicy::OldestFirst);
     for (i, t) in tiles.iter().enumerate() {

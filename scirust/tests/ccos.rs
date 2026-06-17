@@ -91,6 +91,35 @@ fn page_out_policies_differ() {
 }
 
 #[test]
+fn hybrid_evicts_oldest_not_lowest_impact() {
+    // The default hybrid uses *two different keys*: it pages HOT→WARM by σ_E
+    // (pinned by `page_out_policies_differ`), but evicts →COLD strictly by age.
+    // Under a budget so tight that everything is paged and one tile must still
+    // be dropped, the evicted tile must be the OLDEST — not the lowest-σ_E.
+    let proj = Projection::new(11);
+    let rhos = [0.9f32, 0.7, 0.5, 0.3, 0.1]; // slot 0 oldest & highest σ_E; slot 4 lowest σ_E
+    let n = rhos.len();
+    let mut cache = ElasticKvCache::with_budget((n - 1) * 96); // all-WARM(480) - one tile
+    for (i, &r) in rhos.iter().enumerate() {
+        let (_q, toks) = generate(200 + i as u64, 1, r);
+        cache.insert(build_tile(&proj, &toks[0], i as u32, false));
+    }
+    assert_eq!(cache.state(0), TileState::Hot);
+    cache.enforce_budget();
+
+    // Exactly one eviction, and it is the oldest (slot 0) — NOT the lowest-σ_E
+    // (slot 4), which only got paged to WARM.
+    let (_h, _w, cold) = cache.counts();
+    assert_eq!(cold, 1, "expected exactly one eviction");
+    assert_eq!(cache.state(0), TileState::Cold, "oldest should be evicted");
+    assert_eq!(
+        cache.state(n - 1),
+        TileState::Warm,
+        "lowest-σ_E tile should be paged, not evicted"
+    );
+}
+
+#[test]
 fn score_all_skips_cold() {
     let proj = Projection::new(7);
     let (q, toks) = generate(8, 6, 0.3);

@@ -13,9 +13,11 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
   sans I/O ni allocation ; `enforce_budget()` borne l'empreinte logique sous un
   budget en octets (`PageOutPolicy::LowestImpactFirst` — plus faible `σ_E`
   d'abord — ou `OldestFirst`) puis évince si nécessaire ; `evict()` recycle le
-  slot via free-list. Exemple `examples/ccos_softpaging.rs` + 5 tests
-  d'intégration (`tests/ccos.rs`). Mesure : pager **la moitié** des tuiles
-  HOT→WARM laisse la sortie d'attention à **cos ≈ 0,9995** vs tout-HOT.
+  slot via free-list. La politique par défaut est l'**hybride** (`Default` :
+  pagination par `σ_E`, éviction par ancienneté) ; `with_budget()` la construit.
+  Exemple `examples/ccos_softpaging.rs` + 6 tests d'intégration
+  (`tests/ccos.rs`). Mesure : pager **la moitié** des tuiles HOT→WARM laisse la
+  sortie d'attention à **cos ≈ 0,9995** vs tout-HOT.
 - **Calibration de λ** (`examples/calibrate_lambda.rs` + test
   `tests/calibration.rs`, §7.9) : confronte le poids du résidu à une attention
   FP de référence. La forme `λ ∝ σ_E` est **validée** (α* stable sur `rho`) ;

@@ -29,13 +29,24 @@ pub enum TileState {
     Cold,
 }
 
-/// Order in which HOT tiles are paged out under memory pressure.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Order in which HOT tiles are paged out (HOT→WARM) under memory pressure.
+///
+/// Note this only governs the **paging** phase. Eviction (WARM/HOT→COLD), which
+/// only kicks in once paging the whole working set is not enough, is **always**
+/// causal (oldest-inserted first) — dropping a token entirely is a harder loss
+/// than freeing its residual, so it should hit the most causally-distant context
+/// regardless of `σ_E`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum PageOutPolicy {
-    /// Page out the lowest-`σ_E` tiles first — their 1-bit residual matters
-    /// least, so WARM is near-lossless there (cf. §7.2). Default.
+    /// **Hybrid (recommended, default).** Page out the lowest-`σ_E` tiles first
+    /// — their 1-bit residual matters least, so WARM is near-lossless there
+    /// (cf. §7.2) — then, if still over budget, evict the oldest by age. Best of
+    /// both: free residuals where they hurt least, drop tokens where they matter
+    /// least causally.
+    #[default]
     LowestImpactFirst,
-    /// Page out the oldest-inserted tiles first (causal distance, §4).
+    /// Pure causal: page out the oldest-inserted tiles first (causal distance,
+    /// §4). Eviction order is unchanged (also oldest-first).
     OldestFirst,
 }
 
@@ -43,7 +54,7 @@ pub enum PageOutPolicy {
 pub struct ElasticKvCache {
     tiles: Vec<SciRustSlhaTile>,
     state: Vec<TileState>,
-    seq: Vec<u64>, // insertion order (for OldestFirst), survives slot reuse
+    seq: Vec<u64>, // insertion order (paging tie-break + eviction), survives reuse
     free: Vec<usize>,
     budget_bytes: usize,
     policy: PageOutPolicy,
@@ -61,6 +72,12 @@ impl ElasticKvCache {
             policy,
             next_seq: 0,
         }
+    }
+
+    /// Convenience constructor with the recommended default policy (the hybrid
+    /// [`PageOutPolicy::LowestImpactFirst`]: page by `σ_E`, evict by age).
+    pub fn with_budget(budget_bytes: usize) -> Self {
+        Self::new(budget_bytes, PageOutPolicy::default())
     }
 
     /// Insert a HOT tile, reusing a recycled (COLD) slot when available. Returns
@@ -147,8 +164,13 @@ impl ElasticKvCache {
         c
     }
 
-    /// Bring the logical footprint under `budget_bytes`: first page HOT→WARM in
-    /// policy order, then (if still over) evict the oldest live tiles → COLD.
+    /// Bring the logical footprint under `budget_bytes` in two phases:
+    ///
+    /// 1. **Page** HOT→WARM in [`PageOutPolicy`] order (default hybrid: lowest
+    ///    `σ_E` first — free the residual where it hurts least).
+    /// 2. If still over budget, **evict** live tiles →COLD, **always oldest
+    ///    first** (causal distance) — dropping a token is the harder loss, so it
+    ///    targets the most distant context regardless of `σ_E`.
     pub fn enforce_budget(&mut self) {
         if self.live_bytes() <= self.budget_bytes {
             return;
