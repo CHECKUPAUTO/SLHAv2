@@ -1,0 +1,21 @@
+# Rust build artifacts
+target/
+
+# Cargo lock file (generated)
+# Uncomment if you want to ignore Cargo.lock
+# Cargo.lock
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Benchmark reports
+*.svg
+*.html

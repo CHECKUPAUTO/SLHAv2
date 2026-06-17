@@ -1,0 +1,28 @@
+[package]
+name = "scirust"
+version = "0.1.0"
+edition = "2021"
+authors = ["Forge CHECKUPAUTO <forge@checkupauto.io>"]
+description = "SLHA v2: Sub-Low Rank Hybrid Attention — Asymmetric attention scorer for LLM inference"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/CHECKUPAUTO/SLHAv2"
+
+[lib]
+path = "scirust/src/lib.rs"
+
+[features]
+default = ["avx2", "popcnt"]
+avx2 = []
+popcnt = []
+neon = []
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[example]]
+name = "basic_usage"
+path = "examples/basic_usage.rs"
+
+[[bench]]
+name = "score"
+harness = false
