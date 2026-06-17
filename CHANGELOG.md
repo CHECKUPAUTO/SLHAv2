@@ -6,6 +6,16 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
 ## [Unreleased]
 
 ### Added
+- **Couche d'interfaçage CCOS** (`src/ccos.rs`, §4) : `ElasticKvCache`, un cache
+  KV élastique sur **arène contiguë** qui pilote le *Soft-Paging*. Trois états
+  HOT (128 o) / WARM (96 o, résidu masqué + `λ = 0`) / COLD (évincé, slot
+  recyclé) ; `page_out()` masque/libère les 32 o de `residual_bitmap` en **O(1)**
+  sans I/O ni allocation ; `enforce_budget()` borne l'empreinte logique sous un
+  budget en octets (`PageOutPolicy::LowestImpactFirst` — plus faible `σ_E`
+  d'abord — ou `OldestFirst`) puis évince si nécessaire ; `evict()` recycle le
+  slot via free-list. Exemple `examples/ccos_softpaging.rs` + 5 tests
+  d'intégration (`tests/ccos.rs`). Mesure : pager **la moitié** des tuiles
+  HOT→WARM laisse la sortie d'attention à **cos ≈ 0,9995** vs tout-HOT.
 - **Calibration de λ** (`examples/calibrate_lambda.rs` + test
   `tests/calibration.rs`, §7.9) : confronte le poids du résidu à une attention
   FP de référence. La forme `λ ∝ σ_E` est **validée** (α* stable sur `rho`) ;
@@ -18,9 +28,11 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
 ### Fixed
 - **Doc & packaging.** Remplacement d'un second crate `scirust` déclaré à la
   racine dont le bench (`benches/score.rs`), la doc (`docs/api.md`) et ce
-  changelog décrivaient une **API inexistante** (`SciRustSlhaTile::new`,
-  `score_safe`, `enforce_paging`, `TileState`/`TileError`) et une tuile de
-  « 104 octets ». La racine est désormais un **workspace Cargo** autour de
+  changelog décrivaient une **API inexistante** *portée par la tuile*
+  (`SciRustSlhaTile::new`, `score_safe`, `enforce_paging`, `TileState`/`TileError`)
+  et une tuile de « 104 octets » (à ne pas confondre avec le gestionnaire réel
+  `ccos::ElasticKvCache` ajouté ci-dessus, distinct de la tuile). La racine est
+  désormais un **workspace Cargo** autour de
   l'unique crate `scirust` ; `docs/api.md` documente l'**API réelle** (tuile de
   **128 octets**, score via `compute_score`) ; le bench cassé est supprimé
   (`scirust/benches/kernel.rs`, fonctionnel, est conservé). Suppression des

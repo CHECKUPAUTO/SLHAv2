@@ -37,7 +37,8 @@ pub const GROUP_DIM: usize = D_C / N_GROUPS; // 16
 /// Full-fidelity tile: latent + residual both live (cache L1/L2).
 pub const FLAG_HOT: u16 = 0;
 /// Elastic paging: residual bitmap considered freed; score uses the latent
-/// base only (`dynamic_lambda` is bypassed). ~30% footprint drop, no I/O.
+/// base only (`dynamic_lambda` is bypassed). 25% footprint drop (32 o of 128),
+/// no I/O. Driven by [`crate::ccos::ElasticKvCache`].
 pub const FLAG_WARM: u16 = 1 << 0;
 /// Latent uses the NF4 (NormalFloat-4) codebook instead of uniform INT4.
 pub const FLAG_NF4: u16 = 1 << 1;

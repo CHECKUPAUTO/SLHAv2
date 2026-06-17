@@ -132,11 +132,11 @@ Grâce à la décomposition asymétrique de SLHA v2, le noyau CCOS applique le p
 
 ```
        [ Contexte HOT ]  ──▶  Mémoire Cache L1/L2 active
-         (Latent 4-bit + Résidu 1-bit)
+         (Latent 4-bit + Résidu 1-bit)            128 o
                │
-               ▼  Pression mémoire détectée (enforce_paging)
+               ▼  Pression mémoire détectée (enforce_budget)
       [ Contexte WARM ]  ──▶  Libération des Bitmaps Résiduels
-         (Latent 4-bit uniquement) -> Gain immédiat de 30% d'espace
+         (Latent 4-bit uniquement)                 96 o  (−25 %)
                │
                ▼  Éviction causale totale
        [ Contexte COLD ] ──▶  Snapshot chiffré sur disque (EventLog)
@@ -144,9 +144,20 @@ Grâce à la décomposition asymétrique de SLHA v2, le noyau CCOS applique le p
 
 | Mode | Description | Impact |
 |---|---|---|
-| **HOT** (Working Set Actif) | Les tuiles SLHA v2 sont complètes. Le calcul fusionné (Bas rang + Résidu) s'exécute à pleine puissance dans les caches L1/L2. La perplexité sémantique est optimale. | Fidélité maximale |
-| **WARM** (Pagination Élastique) | Lorsque la mémoire sature ou qu'un nœud s'éloigne dans l'arbre causal, CCOS invoque `enforce_paging()`. Au lieu de décharger le nœud sur disque, le noyau libère uniquement les 32 octets de `residual_bitmap`. La structure reste en cache L3 ou en DRAM, et SciRust bascule dynamiquement sur un mode d'attention basse-fidélité pur (`dynamic_lambda = 0.0`). L'empreinte chute instantanément sans aucune opération d'I/O. | Gain immédiat de ~30% d'espace mémoire |
-| **COLD** (Archivé) | Le nœud est intégralement purgé de la mémoire active. Sa trace transactionnelle reste préservée de façon immuable dans l'EventLog. | Persistance chiffrée |
+| **HOT** (Working Set Actif) | Les tuiles SLHA v2 sont complètes. Le calcul fusionné (Bas rang + Résidu) s'exécute à pleine puissance dans les caches L1/L2. La perplexité sémantique est optimale. | Fidélité maximale — 128 o |
+| **WARM** (Pagination Élastique) | Lorsque la mémoire sature ou qu'un nœud s'éloigne dans l'arbre causal, CCOS appelle `page_out()`. Au lieu de décharger le nœud sur disque, le noyau remet à zéro les 32 octets de `residual_bitmap` et pose `dynamic_lambda = 0.0` + `FLAG_WARM` : le score bascule sur le terme grossier seul (eq. 2.3). La structure reste en cache L3 / DRAM ; l'empreinte chute sans aucune I/O ni allocation. | Empreinte logique 96 o (−25 %) |
+| **COLD** (Archivé) | Le nœud est intégralement purgé du jeu actif (`evict()`) et son slot est recyclé au prochain `insert`. Sa trace transactionnelle resterait préservée de façon immuable dans l'EventLog (non simulé ici). | Persistance chiffrée |
+
+**Gestionnaire de référence (`ccos::ElasticKvCache`).** Le module [`scirust/src/ccos.rs`](scirust/src/ccos.rs) implémente cette politique sur une **arène contiguë** de tuiles. `enforce_budget()` borne l'**empreinte logique** (HOT 128 o / WARM 96 o / COLD 0 o) sous un budget en octets : il page d'abord HOT→WARM selon une [`PageOutPolicy`] (`LowestImpactFirst` — les plus faibles `σ_E` d'abord, là où le résidu 1-bit compte le moins, §7.2 ; ou `OldestFirst` — distance causale), puis, si nécessaire, évince les plus anciens →COLD. Le masquage WARM est **O(1)** (zéro 32 o + un drapeau), sans allocation ; l'éviction recycle le slot via une *free-list*.
+
+L'exemple [`ccos_softpaging`](scirust/examples/ccos_softpaging.rs) (8 192 tuiles, 1 024 Ko en tout-HOT) mesure l'effet sur la **sortie d'attention** :
+
+| Régime | Budget | HOT / WARM / COLD | Empreinte | cos(sortie, tout-HOT) |
+|---|---|---|---|---|
+| **A** — paging seul | 896 Ko (112 o/tuile) | 4096 / 4096 / 0 | 896 Ko (88 %) | **0,9995** |
+| **B** — éviction forcée | 320 Ko (40 o/tuile) | 0 / 3413 / 256 | 319 Ko ≤ budget | — |
+
+Pager **la moitié** des tuiles (les plus faibles `σ_E`) HOT→WARM ne dégrade quasiment pas la sortie (cos ≈ 0,9995) : c'est le bénéfice central du Soft-Paging — borner la mémoire en libérant le résidu là où il pèse le moins, sans I/O ni perte de jeton. Sous forte pression (B), l'éviction →COLD borne le footprint au prix du contexte le plus ancien (qu'un vrai CCOS snapshoterait dans l'EventLog).
 
 ---
 
@@ -243,7 +254,7 @@ Les limitations de la v1 sont **levées** dans le crate `scirust` (`cargo test` 
 - ✅ **`read_volatile` supprimé.** Le chemin chaud lit des `slice`s normaux : LLVM peut de nouveau auto-vectoriser et réordonner. La spécialisation SIMD n'est pas encore écrite, mais elle n'est plus **bloquée**.
 - ✅ **INT4 signé (zero-point).** La déquantification est `(nibble − 8)·scale` : la base bas-rang représente désormais des valeurs négatives. Garanti par le test `int4_dequant_round_trips_signed_values`.
 - ✅ **API sûre, pas de `target_feature` trompeur.** Plus d'`unsafe`, plus d'import mort, plus de gate `avx2` sans intrinsèque ; `count_ones()` se compile en `POPCNT` quand la cible le supporte, avec repli portable (ARM Neoverse/Thor inclus).
-- ✅ **Tuile = 128 o sans padding** et **crate compilable + testé** : **30 tests** (unitaires + intégration + property/fuzz + doctests), dont l'identité de Hamming `d_s − 2·popcount` prouvée contre une référence brute, l'équivalence SIMD ≡ scalaire (fuzz randomisé), la finitude des scores, et la correspondance code ↔ eq. (2.3).
+- ✅ **Tuile = 128 o sans padding** et **crate compilable + testé** : **36 tests** (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS Soft-Paging), dont l'identité de Hamming `d_s − 2·popcount` prouvée contre une référence brute, l'équivalence SIMD ≡ scalaire (fuzz randomisé), la finitude des scores, et la correspondance code ↔ eq. (2.3).
 
 **Avancées récentes & restant :**
 

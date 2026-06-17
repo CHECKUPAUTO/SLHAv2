@@ -5,15 +5,18 @@ tests). Pour la spécification et les mesures, voir [`../SLHAv2.md`](../SLHAv2.m
 et [`../FINDINGS.md`](../FINDINGS.md).
 
 > ⚠️ Une version antérieure de ce fichier décrivait une API inexistante
-> (`new`, `score_safe`, `enforce_paging`, `TileState`, `TileError`, …) et une
-> tuile de « 104 octets ». **C'est faux** : voir l'API ci-dessous (tuile de
-> **128 octets**, score via `compute_score`). Corrigé.
+> (`new`, `score_safe`, `TileError`, des méthodes de paging *portées par la
+> tuile*…) et une tuile de « 104 octets ». **C'est faux** : voir l'API ci-dessous
+> (tuile de **128 octets**, score via `compute_score`). Le Soft-Paging réel vit
+> dans un gestionnaire séparé, [`ccos::ElasticKvCache`](#modules-scirust), pas
+> sur la tuile. Corrigé.
 
 ## Modules (`scirust::…`)
 
 | Module | Rôle |
 |---|---|
 | `attention::slha_v2` | Tuile + kernel de score fusionné (eq. 2.3), quantizers INT4/NF4 |
+| `ccos` | `ElasticKvCache` (Soft-Paging HOT/WARM/COLD, §4), `PageOutPolicy`, `TileState` |
 | `metrics` | `dot`, `cosine`, `rel_l2`, `pearson`, `spearman`, `topk_overlap`, `rms`, `softmax_into` |
 | `rng` | PRNG déterministe `Rng` (SplitMix64) + gaussien |
 | `linalg` | `jacobi_eigh` (décomposition propre symétrique, pour la PCA) |
@@ -85,10 +88,12 @@ impl SciRustSlhaTile {
 }
 ```
 
-> Il n'y a **pas** de constructeur `new`, de `score_safe`/`Result`, ni
-> d'`enforce_paging`/`TileState`. Une tuile se construit par littéral de struct
-> (cf. exemple) ou via `learned::LearnedModel::encode` / `scenario::build_tile`.
-> Pour passer en WARM : `tile.flags |= FLAG_WARM`.
+> Il n'y a **pas** de constructeur `new` ni de `score_safe`/`Result` sur la
+> tuile. Une tuile se construit par littéral de struct (cf. exemple) ou via
+> `learned::LearnedModel::encode` / `scenario::build_tile`. Pour passer en WARM à
+> la main : `tile.flags |= FLAG_WARM`. La machine à états HOT/WARM/COLD et le
+> paging sous budget sont gérés par [`ccos::ElasticKvCache`](#modules-scirust)
+> (`page_out` / `evict` / `enforce_budget`), pas par la tuile elle-même.
 
 ## Quantizers (`attention::slha_v2`)
 
@@ -160,7 +165,7 @@ Voir aussi `scirust/examples/basic_usage.rs` (exemple exécutable identique).
 ## Build / test / bench (depuis la racine, workspace)
 
 ```sh
-cargo test                 # 31 tests (unitaires + intégration + property/fuzz + doctests + calibration λ)
+cargo test                 # 36 tests (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS)
 cargo bench                # micro-benchs criterion (scalaire / AVX2 / AVX-512)
 cargo run -p scirust --example basic_usage
 cargo build --workspace --all-targets   # compile lib + tests + benches + exemples
