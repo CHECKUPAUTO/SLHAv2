@@ -19,7 +19,7 @@ mesures ont **réellement** établi. Toutes les valeurs sont reproductibles
 | Le résidu 1-bit aide-t-il ? | **HOT ≥ WARM partout**, parfois +0,28 | §7.2–7.3 |
 | Fidélité de la **sortie** d'attention ? | **cosinus 0,95–0,997** vs FP | §7.6 |
 | Trafic mémoire vs bf16 ? | **2× moins d'octets/token → ~2,5× tokens/s** | §7.5 |
-| Débit SIMD (vs scalaire) ? | AVX2 **×11,5**, AVX-512 **×14,1** | §7.4 |
+| Débit SIMD (vs scalaire) ? | x86 : AVX2 **×11,5**, AVX-512 **×14,1** ; ARM : NEON **×5,7** (Jetson Thor) | §7.4 |
 | Projection apprise vs PCA (Q≠K) ? | WARM **0,16 → 0,86** | §7.7 |
 | Cache KV élastique sous budget (Soft-Paging) ? | pager **½** des tuiles HOT→WARM : sortie à **cos 0,9995** | §4 |
 
@@ -41,6 +41,12 @@ mesures ont **réellement** établi. Toutes les valeurs sont reproductibles
 - **L'argument « mur de bande passante » tient au niveau kernel.** 128 o/token
   contre 256 o pour une clé bf16 → **~2,5× plus de tokens/s** à débit GB/s
   comparable.
+- **Mesuré sur les deux cibles (x86 + ARM).** Le kit `platform_report` produit
+  des chiffres x86 (AVX-512 ~×14 sur Xeon) **et** ARM **mesurés sur un Jetson
+  Thor AGX 128** (Neoverse-V3AE) : NEON **~×5,7** vs scalaire. Au passage il a
+  **corrigé une fausse hypothèse** : le Thor a des lignes de cache de **64 o**
+  (pas 128 — le « 128 » = 128 Go de mémoire unifiée CPU/GPU), d'où le retour à
+  `align(64)` ; et **`sve2` est présent** (cible de la roadmap §8).
 
 ## 2. Les leviers réels (et les faux leviers)
 

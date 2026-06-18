@@ -394,7 +394,8 @@ Both of our target families use a \textbf{64-byte} cache line: x86-64, and
 AArch64/Neoverse-V3AE. We initially assumed a Jetson Thor-class part would
 use 128-byte lines (the ``128'' in \emph{AGX 128}), but measuring the device
 refuted this---all levels are 64~bytes (L1d/L1i/L2; see Table~\ref{tab:thor})
----so the ``128'' denotes the 128~GB LPDDR5X unified memory, not the line.
+---so the ``128'' denotes the 128~GB \emph{unified CPU/GPU} LPDDR5X memory,
+not the cache line.
 We therefore align the tile to \texttt{64}, which is correct and optimal on
 both families: a 64-aligned 128-byte tile occupies exactly two full lines and
 never straddles a third, and \texttt{align(64)} prevents false sharing without

@@ -21,7 +21,8 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
   §3.1). On avait introduit un `align(128)` conditionnel sur `aarch64` en
   supposant une ligne de cache de 128 o sur le Jetson Thor ; **la mesure de
   l'appareil l'a réfuté** (L1d/L1i/L2 = 64 o — le « 128 » d'*AGX 128* = les
-  128 Go LPDDR5X). `align(64)` est correct et optimal sur les deux cibles
+  128 Go de **mémoire unifiée CPU/GPU** LPDDR5X, pas la ligne de cache).
+  `align(64)` est correct et optimal sur les deux cibles
   (tuile = 2 lignes de 64 o). Un `align(128)` ne sert que sur les puces à ligne
   de 128 o (p. ex. Apple Silicon) → détection hôte en `build.rs` (roadmap).
 - **Popcount résidu vectorisé AVX-512 VPOPCNTDQ** (`hamming_distance`, eq. 2.3) :

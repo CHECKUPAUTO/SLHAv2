@@ -106,7 +106,7 @@ Pour maximiser la localité spatiale et temporelle, nous définissons une struct
 | Bitmaps de Résidus (d_s = 256) | 4 mots binaires de 64 bits (u64) | 32 Octets | Registres Vectoriels AVX-512 / ARM Neon |
 | Métadonnées (échelle, λ, σ_E, token, position, tête, flags, réserve) | 3×f32 + 2×u32 + 2×u16 + 8 o réservés | 32 Octets | Pagination CCOS & contrôle d'amplitude |
 
-**Invariant Matériel (implémenté & vérifié) :** Les trois blocs totalisent **exactement 128 octets** — latent 64 o + résidu 32 o + métadonnées 32 o. Avec `#[repr(C, align(64))]`, `size_of::<SciRustSlhaTile>()` vaut **128 octets sans aucun padding** (`align_of = 64`), soit **2 lignes de cache pleines**, alignées sur 64 o donc sans chevauchement d'une 3ᵉ ligne. C'est l'alignement correct pour **les deux cibles** : x86-64 **et** AArch64/Neoverse-V3AE — ce dernier **mesuré à 64 o** sur tous les niveaux (L1d/L1i/L2) d'un **Jetson Thor AGX 128** (le « 128 » désigne les 128 Go de LPDDR5X, **pas** la ligne de cache). *Réserve corrigée :* on avait d'abord supposé une ligne de 128 o sur le Thor et appliqué `align(128)` sur `aarch64` ; la mesure de l'appareil l'a réfuté, donc on est revenu à `align(64)` (un `align(128)` ne servirait que sur les rares puces à ligne de 128 o, p. ex. Apple Silicon — via détection hôte en `build.rs`, cf. roadmap). Garanti par le test `tile_is_exactly_128_bytes_zero_padding` (somme des champs == `size_of` == 128, `align_of == 64`) et par la cross-compilation `aarch64-unknown-linux-gnu`. *Historique :* l'énoncé v1 « exactement 104 octets / multiple d'une ligne de cache » était faux — 104 n'est pas un multiple de 64, et l'`align(64)` arrondit la taille à 128. Les 24 octets qui n'étaient alors que du remplissage portent désormais des métadonnées utiles (σ_E, identifiants, drapeaux de pagination).
+**Invariant Matériel (implémenté & vérifié) :** Les trois blocs totalisent **exactement 128 octets** — latent 64 o + résidu 32 o + métadonnées 32 o. Avec `#[repr(C, align(64))]`, `size_of::<SciRustSlhaTile>()` vaut **128 octets sans aucun padding** (`align_of = 64`), soit **2 lignes de cache pleines**, alignées sur 64 o donc sans chevauchement d'une 3ᵉ ligne. C'est l'alignement correct pour **les deux cibles** : x86-64 **et** AArch64/Neoverse-V3AE — ce dernier **mesuré à 64 o** sur tous les niveaux (L1d/L1i/L2) d'un **Jetson Thor AGX 128** (le « 128 » désigne les 128 Go de **mémoire unifiée CPU/GPU** LPDDR5X, **pas** la ligne de cache). *Réserve corrigée :* on avait d'abord supposé une ligne de 128 o sur le Thor et appliqué `align(128)` sur `aarch64` ; la mesure de l'appareil l'a réfuté, donc on est revenu à `align(64)` (un `align(128)` ne servirait que sur les rares puces à ligne de 128 o, p. ex. Apple Silicon — via détection hôte en `build.rs`, cf. roadmap). Garanti par le test `tile_is_exactly_128_bytes_zero_padding` (somme des champs == `size_of` == 128, `align_of == 64`) et par la cross-compilation `aarch64-unknown-linux-gnu`. *Historique :* l'énoncé v1 « exactement 104 octets / multiple d'une ligne de cache » était faux — 104 n'est pas un multiple de 64, et l'`align(64)` arrondit la taille à 128. Les 24 octets qui n'étaient alors que du remplissage portent désormais des métadonnées utiles (σ_E, identifiants, drapeaux de pagination).
 
 Par ailleurs, le **bloc latent INT4 occupe à lui seul exactement 64 octets**, soit **une** ligne de cache pleine pour 128 dimensions sémantiques : c'est ce sous-bloc — et non la tuile entière — qui sature l'unité arithmétique en un unique chargement de ligne. Lors d'un calcul d'attention, SciRust pré-charge les vecteurs de requêtes dans le cache L1, puis balaie les tuiles de contexte séquentiellement.
 
@@ -340,7 +340,7 @@ Pour lever la réserve « base idéale », `measure_learned` **apprend** la proj
 - **Résultat négatif assumé : whitener le latent DÉGRADE** (0,859 → 0,750 à decay 0,95) — l'échelle INT4 alloue mieux sa résolution non whitenée.
 - **Attention à l'interprétation.** On pourrait croire ce plafond dû à l'INT4 du latent ; le **§7.8 le réfute** (INT8 n'améliore pas le WARM). Le vrai facteur limitant du coarse est la **projection bas-rang**, pas la quantification.
 
-### 7.4 Débit (scalaire vs AVX2 vs AVX-512)
+### 7.4 Débit (scalaire vs AVX2 / AVX-512 / NEON)
 
 Le kernel dispose de chemins **AVX2** et **AVX-512** (dispatch à l'exécution via `is_x86_feature_detected!`, ordre AVX-512 > AVX2 > scalaire, repli portable), chacun avec un **test d'équivalence** ≡ scalaire. Sur le banc partagé :
 
@@ -350,7 +350,16 @@ Le kernel dispose de chemins **AVX2** et **AVX-512** (dispatch à l'exécution v
 | AVX2 | ~33,9 M scores/s | **×11,5** |
 | AVX-512 (un FMA 16-wide / groupe) | ~41,6 M scores/s | **×14,1** |
 
-Le facteur dépasse le 8×/16× « théorique » car le chemin scalaire payait aussi une déquantification INT4 *branchy* que le SIMD fusionne. AVX-512 n'ajoute que **~+23 %** sur AVX2 : le kernel est court (128 dims) et limité surtout par le dénibblage/chargement, pas par la largeur FMA. À traiter comme un ordre de grandeur sur banc partagé. Un **chemin NEON** (aarch64) existe aussi, **vérifié par cross-compilation** mais non chronométré ici (pas de matériel ARM).
+Le facteur dépasse le 8×/16× « théorique » car le chemin scalaire payait aussi une déquantification INT4 *branchy* que le SIMD fusionne. AVX-512 n'ajoute que **~+23 %** sur AVX2 : le kernel est court (128 dims) et limité surtout par le dénibblage/chargement, pas par la largeur FMA. À traiter comme un ordre de grandeur sur banc partagé.
+
+**Chemin NEON (AArch64) — désormais mesuré.** Sur un **Jetson Thor AGX 128** (Neoverse-V3AE), via le kit `platform_report` :
+
+| Chemin | Débit | Rapport |
+|---|---|---|
+| Scalaire (référence) | ~3,0 M scores/s | 1× |
+| NEON (dispatché) | ~17,1 M scores/s | **×5,7** |
+
+Toutes les lignes de cache de l'appareil sont à **64 o** (L1d/L1i/L2 ; le « 128 » d'*AGX 128* = 128 Go de mémoire unifiée CPU/GPU, pas la ligne), et **`sve2` est présent** — la cible du chemin scalable de la roadmap (§8). x86 reste la baseline serveur ; les chiffres ARM sont **mesurés sur l'appareil**, non extrapolés. (Reproductible : `cargo run --release -p scirust --example platform_report`, ou `scripts/bench_device.sh`.)
 
 **En cycles** (exemple `cycles`, via `rdtsc` ; TSC = cycles de *référence*, pas cycles cœur) : ~**942** cyc/tuile scalaire, ~**89** AVX2, ~**71** AVX-512. Le balayage du working-set montre cyc/tuile ~plat tant que résident (68→71 de 0,25 à 16 Mo) puis **+~19 % à 128 Mo** — débordement cache visible *indirectement* (les compteurs de cache-miss `perf` restent indisponibles, §6.1).
 
