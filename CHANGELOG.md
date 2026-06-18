@@ -6,6 +6,14 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
 ## [Unreleased]
 
 ### Added
+- **Kit de mesure multi-plateforme** (`examples/platform_report.rs` +
+  `scripts/bench_device.sh`) : binaire portable (x86-64 **et** AArch64) qui
+  détecte les features SIMD (AVX2/AVX-512/VPOPCNTDQ ou NEON/dotprod/SVE/SVE2),
+  lit la taille de ligne de cache, confirme l'alignement de tuile adaptatif
+  (`align(128)` sur AArch64), affiche le chemin kernel dispatché, et mesure le
+  débit (scalaire vs SIMD) en temps mur. Sert à produire des chiffres réels
+  **sur l'appareil cible** (p. ex. Jetson Thor AGX 128) sans rien fabriquer ;
+  x86 reste la baseline serveur.
 - **Alignement adaptatif à la ligne de cache** (`SciRustSlhaTile`, §3.1) : l'attribut
   d'alignement est résolu à la compilation depuis `target_arch` via `cfg_attr` —
   `align(128)` sur `aarch64` (Jetson Thor / Neoverse : la tuile tient sur **une
