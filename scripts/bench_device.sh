@@ -27,7 +27,7 @@ $RUN platform_report 2>&1 | tee -a "$OUT"
 echo | tee -a "$OUT"
 
 # Reproduce the paper's §7 numbers on this device (all seeded, portable).
-for ex in measure measure_learned attention_fidelity bench_vs_fp16 calibrate_lambda ccos_softpaging; do
+for ex in measure measure_learned attention_fidelity bench_vs_fp16 calibrate_lambda ccos_softpaging salient_outliers; do
   echo "### ${ex} ###" | tee -a "$OUT"
   $RUN "$ex" 2>&1 | tee -a "$OUT"
   echo | tee -a "$OUT"

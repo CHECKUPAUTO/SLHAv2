@@ -938,13 +938,23 @@ here).
     existing metadata, and the natural victims---$\sigE$ and the MX
     \texttt{group\_scales}---are exactly the fields that drive CCOS paging
     (\S\ref{sec:ccos}) and microscaling, so the trade-off must be measured,
-    not assumed. \emph{(ii)~Expected benefit:} our ablation
-    (\S\ref{sec:ablation}) shows quantization is not the current bottleneck
-    on this benchmark; BiLLM targets quantization-error outliers, a regime
-    our synthetic generator does not yet model. The honest prerequisite is
-    therefore to extend the benchmark with realistic activation outliers, so
-    any salient-value gain can be \emph{demonstrated} before it is baked into
-    the tile.
+    not assumed. \emph{(ii)~Expected benefit --- now measured.} Our ablation
+    (\S\ref{sec:ablation}) shows quantization is not the bottleneck on Gaussian
+    keys; BiLLM targets a different regime, so we extended the benchmark with
+    injected channel outliers (the \texttt{salient\_outliers} example). The
+    mechanism is real at the reconstruction level: with outlier channels of
+    $16$--$32\times$ magnitude, INT4 latent RMSE blows up ($0.08\!\to\!0.52$)
+    while salient-$s$ stays flat \emph{provided} $s$ covers the outlier channels
+    ($s{=}4$ keeps RMSE $\approx 0.08$ throughout). But two caveats temper it:
+    the attention \emph{output} under plain INT4 stays at cosine $\ge 0.977$
+    even at $32\times$ (the softmax absorbs the error, cf.\
+    \S\ref{sec:output}), so the end-task gain is modest; and the tile's
+    affordable budget ($s{=}2$ FP values) can \emph{under}-perform plain INT4
+    when outliers outnumber it (partial preservation imbalances the remaining
+    scale). Measured verdict: worthwhile only if a target model's
+    outlier-channel count is known to fit the budget---otherwise the 16 bytes
+    are better spent on $\sigE$ and the MX scales. A \emph{measured} defer, not
+    a guess.
 \end{enumerate}
 
 Beyond these: larger $\ds$ to lift the near-orthogonal resolution limit

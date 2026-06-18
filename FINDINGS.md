@@ -71,6 +71,15 @@ mesures ont **réellement** établi. Toutes les valeurs sont reproductibles
   reconstruction (le score est dominé par les composantes de forte variance).
 - **INT8 : n'élève pas le plafond du coarse** — corrige une hypothèse initiale
   (§7.3) qui attribuait à tort ce plafond à l'INT4.
+- **Tuile BiLLM (salient outliers) : reportée sur preuve mesurée.** L'exemple
+  `salient_outliers` injecte des canaux outliers : le mécanisme est **réel en
+  reconstruction** (RMSE INT4 0,08 → 0,52 à ×32 ; salient-`s` reste plat si
+  `s ≥` nb d'outliers), mais (a) la **sortie** sous INT4 reste à cos ≥ 0,977
+  même à ×32 (le softmax absorbe), donc le gain end-to-end est **modeste**, et
+  (b) le budget tuile (2 valeurs FP) peut **sous-performer** quand les outliers
+  sont plus nombreux. → ne vaut les 16 o (pris à σ_E / `group_scales`) que si le
+  nb de canaux outliers du modèle cible tient dans le budget. Décision
+  **mesurée**, pas supposée.
 
 ## 4. Honnêteté & limites
 
