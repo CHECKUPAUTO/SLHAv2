@@ -920,15 +920,26 @@ where it helps. The remaining directions are proposals (not measured here).
     the hot term; an SVE2 path on Neoverse-V3AE---\texttt{sve2} is confirmed
     present on the measured device (Table~\ref{tab:thor})---could use
     \emph{scalable} vectors (adapting to the implementation's vector length)
-    beyond fixed NEON. The residual popcount is already branchless and near-optimal at
-    256 bits, so the lever is the dot, not the popcount. We deliberately
-    keep this on the roadmap rather than in the shipped kernel for a
-    concrete toolchain reason: SVE2 intrinsics and portable
-    \texttt{std::simd} are nightly-gated, whereas the reference crate is
-    intentionally stable and dependency-free. The NEON\,+\,\texttt{cnt}
-    fallback remains correct meanwhile; SVE2 will land behind runtime
-    vector-length detection once the intrinsics stabilize --- and requires
-    ARM hardware to measure.
+    beyond fixed NEON. The residual popcount is already branchless and
+    near-optimal at 256 bits, so the lever is the dot, not the popcount. We
+    deliberately keep this on the roadmap rather than in the shipped kernel for
+    a concrete toolchain reason, verified on the current stable compiler
+    (\texttt{rustc 1.94.1}): runtime SVE2 \emph{detection}
+    (\texttt{is\_aarch64\_feature\_detected!("sve2")}) is stable, but the SVE2
+    \emph{intrinsics} (\texttt{svdot\_s32} and friends) are \emph{absent} from
+    stable \texttt{core::arch::aarch64}---they, and portable \texttt{std::simd},
+    remain nightly-gated---whereas the reference crate is intentionally stable
+    and dependency-free. The one stable route, hand-written \texttt{asm!} with
+    SVE2 mnemonics, \emph{compiles} but cannot be \emph{measured or
+    test-checked} without an SVE2 device: our CI is x86-64, and cross-compiling
+    to \texttt{aarch64} type-checks the Rust, not \texttt{asm!} semantics, while
+    every other SIMD path in the crate is pinned by a bit-exact equivalence test
+    (\S\ref{sec:tile})---so shipping an unverified kernel would break that
+    contract. The NEON\,+\,\texttt{cnt} fallback remains correct meanwhile; SVE2
+    will land behind runtime vector-length detection once the intrinsics
+    stabilize on stable (or once an SVE2 device is available to validate an
+    \texttt{asm!} kernel against the scalar reference) --- and requires ARM
+    hardware to measure.
   \item \textbf{Host-adaptive alignment via \texttt{build.rs} (implemented).}
     The tile defaults to \texttt{align(64)}, correct for every 64-byte-line
     part (all our targets, including the Thor). The only case that benefits

@@ -29,6 +29,16 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
   la baseline serveur.
 
 ### Changed / Corrected
+- **Statut toolchain SVE2 documenté précisément** (roadmap #1 ; paper Future
+  Work, `SLHAv2.md` §7.4, `FINDINGS.md`). Vérifié sur `rustc 1.94.1` : la
+  **détection** runtime `is_aarch64_feature_detected!("sve2")` est *stable*,
+  mais les **intrinsèques** SVE2 (`svdot_s32`…) sont **absentes du
+  `core::arch::aarch64` stable** (nightly-only, comme `std::simd`) ; la seule
+  voie stable (`asm!` manuel) *compile* mais reste **invérifiable sans appareil
+  SVE2** (CI x86 ; la cross-compilation ne type-checke pas la sémantique de
+  l'`asm!`). On garde donc **NEON + `cnt`** comme chemin livré, mesuré et
+  correct ; SVE2 reste sur la roadmap (défer *justifié par le toolchain*, pas un
+  oubli). Aucun changement de code.
 - **Alignement de tuile ramené à `align(64)` universel** (`SciRustSlhaTile`,
   §3.1). On avait introduit un `align(128)` conditionnel sur `aarch64` en
   supposant une ligne de cache de 128 o sur le Jetson Thor ; **la mesure de
