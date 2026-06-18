@@ -106,7 +106,7 @@ Pour maximiser la localité spatiale et temporelle, nous définissons une struct
 | Bitmaps de Résidus (d_s = 256) | 4 mots binaires de 64 bits (u64) | 32 Octets | Registres Vectoriels AVX-512 / ARM Neon |
 | Métadonnées (échelle, λ, σ_E, token, position, tête, flags, réserve) | 3×f32 + 2×u32 + 2×u16 + 8 o réservés | 32 Octets | Pagination CCOS & contrôle d'amplitude |
 
-**Invariant Matériel (implémenté & vérifié) :** Les trois blocs totalisent **exactement 128 octets** — latent 64 o + résidu 32 o + métadonnées 32 o. Avec `#[repr(C, align(64))]`, `size_of::<SciRustSlhaTile>()` vaut **128 octets sans aucun padding** (`align_of = 64`), et une tuile occupe **2 lignes de cache pleines**. Garanti par le test `tile_is_exactly_128_bytes_zero_padding` (somme des champs == `size_of` == 128). *Historique :* l'énoncé v1 « exactement 104 octets / multiple d'une ligne de cache » était faux — 104 n'est pas un multiple de 64, et l'`align(64)` arrondit la taille à 128. Les 24 octets qui n'étaient alors que du remplissage portent désormais des métadonnées utiles (σ_E, identifiants, drapeaux de pagination).
+**Invariant Matériel (implémenté & vérifié) :** Les trois blocs totalisent **exactement 128 octets** — latent 64 o + résidu 32 o + métadonnées 32 o. L'**alignement est adaptatif à la ligne de cache**, résolu à la compilation depuis `target_arch` via `cfg_attr` : `#[repr(C, align(128))]` sur `aarch64` (Jetson Thor / Neoverse, ligne de 128 o → la tuile tient sur **une seule** ligne, un unique *line fill* sur le bus LPDDR5X), `#[repr(C, align(64))]` ailleurs (x86-64, ligne de 64 o → **2 lignes pleines**). Dans **les deux cas** `size_of::<SciRustSlhaTile>()` vaut **128 octets sans aucun padding** (128 est multiple de 64 et de 128). Garanti par le test `tile_is_exactly_128_bytes_zero_padding` (somme des champs == `size_of` == 128, `align_of` attendu selon l'architecture) et par la cross-compilation `aarch64-unknown-linux-gnu`. Aucun `build.rs` n'est requis (`target_arch` est un `cfg` de compilation). *Historique :* l'énoncé v1 « exactement 104 octets / multiple d'une ligne de cache » était faux — 104 n'est pas un multiple de 64, et l'`align(64)` arrondit la taille à 128. Les 24 octets qui n'étaient alors que du remplissage portent désormais des métadonnées utiles (σ_E, identifiants, drapeaux de pagination).
 
 Par ailleurs, le **bloc latent INT4 occupe à lui seul exactement 64 octets**, soit **une** ligne de cache pleine pour 128 dimensions sémantiques : c'est ce sous-bloc — et non la tuile entière — qui sature l'unité arithmétique en un unique chargement de ligne. Lors d'un calcul d'attention, SciRust pré-charge les vecteurs de requêtes dans le cache L1, puis balaie les tuiles de contexte séquentiellement.
 
@@ -122,7 +122,7 @@ La constante λ, qui régit le poids de la correction binaire, n'est plus fixe. 
 
 Si l'arborescence causale du code (analysée par le parser CCOS) détecte une zone hautement critique (par exemple, une signature de fonction fondamentale), σ_E augmente pour forcer le processeur à sur-pondérer la fidélité binaire.
 
-> **Statut :** cette forme de λ est une **heuristique** de type estimateur sign-LSH — le facteur √(π/2) provient de la relation gaussienne 𝔼[|X|] = σ·√(2/π), et le 1/√d_s normalise la variance d'une somme de d_s termes ±1. Elle est **plausible mais non encore validée empiriquement** ; à confirmer (ou infirmer) via le protocole du §6.
+> **Statut — calibré (§7.9).** La **forme** `λ ∝ σ_E` est **validée empiriquement** : le multiplicateur optimal (moindres carrés vs référence FP) est ~constant sur tout `rho` (`α* ≈ 4,2`). En revanche la **constante** `√(π/(2·d_s)) ≈ 0,078` **sous-pondère** le résidu d'un facteur ~4,2 ; la constante calibrée est **`C_emp ≈ 0,33`** (à `d_s = 256`). Le crate garde la formule analytique comme défaut conservateur ; l'exemple `calibrate_lambda` re-dérive `C` (l'optimum dépend des données/du modèle — cf. §7.8). Détails et tableau au **§7.9**.
 
 ---
 
@@ -132,11 +132,11 @@ Grâce à la décomposition asymétrique de SLHA v2, le noyau CCOS applique le p
 
 ```
        [ Contexte HOT ]  ──▶  Mémoire Cache L1/L2 active
-         (Latent 4-bit + Résidu 1-bit)
+         (Latent 4-bit + Résidu 1-bit)            128 o
                │
-               ▼  Pression mémoire détectée (enforce_paging)
+               ▼  Pression mémoire détectée (enforce_budget)
       [ Contexte WARM ]  ──▶  Libération des Bitmaps Résiduels
-         (Latent 4-bit uniquement) -> Gain immédiat de 30% d'espace
+         (Latent 4-bit uniquement)                 96 o  (−25 %)
                │
                ▼  Éviction causale totale
        [ Contexte COLD ] ──▶  Snapshot chiffré sur disque (EventLog)
@@ -144,9 +144,20 @@ Grâce à la décomposition asymétrique de SLHA v2, le noyau CCOS applique le p
 
 | Mode | Description | Impact |
 |---|---|---|
-| **HOT** (Working Set Actif) | Les tuiles SLHA v2 sont complètes. Le calcul fusionné (Bas rang + Résidu) s'exécute à pleine puissance dans les caches L1/L2. La perplexité sémantique est optimale. | Fidélité maximale |
-| **WARM** (Pagination Élastique) | Lorsque la mémoire sature ou qu'un nœud s'éloigne dans l'arbre causal, CCOS invoque `enforce_paging()`. Au lieu de décharger le nœud sur disque, le noyau libère uniquement les 32 octets de `residual_bitmap`. La structure reste en cache L3 ou en DRAM, et SciRust bascule dynamiquement sur un mode d'attention basse-fidélité pur (`dynamic_lambda = 0.0`). L'empreinte chute instantanément sans aucune opération d'I/O. | Gain immédiat de ~30% d'espace mémoire |
-| **COLD** (Archivé) | Le nœud est intégralement purgé de la mémoire active. Sa trace transactionnelle reste préservée de façon immuable dans l'EventLog. | Persistance chiffrée |
+| **HOT** (Working Set Actif) | Les tuiles SLHA v2 sont complètes. Le calcul fusionné (Bas rang + Résidu) s'exécute à pleine puissance dans les caches L1/L2. La perplexité sémantique est optimale. | Fidélité maximale — 128 o |
+| **WARM** (Pagination Élastique) | Lorsque la mémoire sature ou qu'un nœud s'éloigne dans l'arbre causal, CCOS appelle `page_out()`. Au lieu de décharger le nœud sur disque, le noyau remet à zéro les 32 octets de `residual_bitmap` et pose `dynamic_lambda = 0.0` + `FLAG_WARM` : le score bascule sur le terme grossier seul (eq. 2.3). La structure reste en cache L3 / DRAM ; l'empreinte chute sans aucune I/O ni allocation. | Empreinte logique 96 o (−25 %) |
+| **COLD** (Archivé) | Le nœud est intégralement purgé du jeu actif (`evict()`) et son slot est recyclé au prochain `insert`. Sa trace transactionnelle resterait préservée de façon immuable dans l'EventLog (non simulé ici). | Persistance chiffrée |
+
+**Gestionnaire de référence (`ccos::ElasticKvCache`).** Le module [`scirust/src/ccos.rs`](scirust/src/ccos.rs) implémente cette politique sur une **arène contiguë** de tuiles. `enforce_budget()` borne l'**empreinte logique** (HOT 128 o / WARM 96 o / COLD 0 o) sous un budget en octets : il page d'abord HOT→WARM selon une [`PageOutPolicy`] (`LowestImpactFirst` — les plus faibles `σ_E` d'abord, là où le résidu 1-bit compte le moins, §7.2 ; ou `OldestFirst` — distance causale), puis, si nécessaire, évince les plus anciens →COLD. Le masquage WARM est **O(1)** (zéro 32 o + un drapeau), sans allocation ; l'éviction recycle le slot via une *free-list*.
+
+L'exemple [`ccos_softpaging`](scirust/examples/ccos_softpaging.rs) (8 192 tuiles, 1 024 Ko en tout-HOT) mesure l'effet sur la **sortie d'attention** :
+
+| Régime | Budget | HOT / WARM / COLD | Empreinte | cos(sortie, tout-HOT) |
+|---|---|---|---|---|
+| **A** — paging seul | 896 Ko (112 o/tuile) | 4096 / 4096 / 0 | 896 Ko (88 %) | **0,9995** |
+| **B** — éviction forcée | 320 Ko (40 o/tuile) | 0 / 3413 / 256 | 319 Ko ≤ budget | — |
+
+Pager **la moitié** des tuiles (les plus faibles `σ_E`) HOT→WARM ne dégrade quasiment pas la sortie (cos ≈ 0,9995) : c'est le bénéfice central du Soft-Paging — borner la mémoire en libérant le résidu là où il pèse le moins, sans I/O ni perte de jeton. Sous forte pression (B), l'éviction →COLD borne le footprint au prix du contexte le plus ancien (qu'un vrai CCOS snapshoterait dans l'EventLog).
 
 ---
 
@@ -243,7 +254,7 @@ Les limitations de la v1 sont **levées** dans le crate `scirust` (`cargo test` 
 - ✅ **`read_volatile` supprimé.** Le chemin chaud lit des `slice`s normaux : LLVM peut de nouveau auto-vectoriser et réordonner. La spécialisation SIMD n'est pas encore écrite, mais elle n'est plus **bloquée**.
 - ✅ **INT4 signé (zero-point).** La déquantification est `(nibble − 8)·scale` : la base bas-rang représente désormais des valeurs négatives. Garanti par le test `int4_dequant_round_trips_signed_values`.
 - ✅ **API sûre, pas de `target_feature` trompeur.** Plus d'`unsafe`, plus d'import mort, plus de gate `avx2` sans intrinsèque ; `count_ones()` se compile en `POPCNT` quand la cible le supporte, avec repli portable (ARM Neoverse/Thor inclus).
-- ✅ **Tuile = 128 o sans padding** et **crate compilable + testé** : **30 tests** (unitaires + intégration + property/fuzz + doctests), dont l'identité de Hamming `d_s − 2·popcount` prouvée contre une référence brute, l'équivalence SIMD ≡ scalaire (fuzz randomisé), la finitude des scores, et la correspondance code ↔ eq. (2.3).
+- ✅ **Tuile = 128 o sans padding** et **crate compilable + testé** : **41 tests** (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS Soft-Paging), dont l'identité de Hamming `d_s − 2·popcount` prouvée contre une référence brute, l'équivalence SIMD ≡ scalaire (fuzz randomisé), la finitude des scores, et la correspondance code ↔ eq. (2.3).
 
 **Avancées récentes & restant :**
 
@@ -341,6 +352,8 @@ Le kernel dispose de chemins **AVX2** et **AVX-512** (dispatch à l'exécution v
 
 Le facteur dépasse le 8×/16× « théorique » car le chemin scalaire payait aussi une déquantification INT4 *branchy* que le SIMD fusionne. AVX-512 n'ajoute que **~+23 %** sur AVX2 : le kernel est court (128 dims) et limité surtout par le dénibblage/chargement, pas par la largeur FMA. À traiter comme un ordre de grandeur sur banc partagé. Un **chemin NEON** (aarch64) existe aussi, **vérifié par cross-compilation** mais non chronométré ici (pas de matériel ARM).
 
+**En cycles** (exemple `cycles`, via `rdtsc` ; TSC = cycles de *référence*, pas cycles cœur) : ~**942** cyc/tuile scalaire, ~**89** AVX2, ~**71** AVX-512. Le balayage du working-set montre cyc/tuile ~plat tant que résident (68→71 de 0,25 à 16 Mo) puis **+~19 % à 128 Mo** — débordement cache visible *indirectement* (les compteurs de cache-miss `perf` restent indisponibles, §6.1).
+
 ### 7.5 Trafic mémoire & débit vs une référence bf16 (§6.2, au niveau kernel)
 
 `bench_vs_fp16` compare le scoring d'une tuile SLHA (**128 o/token**) à un produit scalaire sur une clé **bf16** (`d_k·2 = 256` o/token), les deux en AVX2 (le comparatif isole le format mémoire, pas la chance de codegen).
@@ -399,7 +412,26 @@ Le latent peut être encodé en **NF4** (codebook NormalFloat-4, 16 niveaux aux 
 
 **Constat — et correction du §7.3 :** NF4 réduit l'erreur de reconstruction (test `nf4_beats_uniform_int4_on_gaussian_latent`) mais le gain end-to-end est **nul à marginal** (0,884 → 0,885). Surtout, **INT8 ne fait pas mieux qu'INT4 au WARM (~0,61)** : doubler les bits ne lève pas le plafond du terme coarse. **Le facteur limitant n'est donc PAS la quantification du latent, mais la projection bas-rang elle-même** (la part du score que la PCA laisse au résidu). Cela recadre les leviers réels : **(a)** une meilleure projection (§7.7 : apprise, WARM 0,16 → 0,86) et **(b)** le résidu 1-bit (HOT). NF4 reste utile (meilleure reconstruction, sans coût de tuile), mais n'est pas le levier de fidélité de score.
 
-**Conclusion partielle.** Le mécanisme est **mathématiquement correct** (tests, dont les équivalences scalaire/AVX2) et **directionnellement validé** : HOT ≥ WARM, Soft-Paging quasi sans perte à faible `rho`, SIMD ×13, **~2,5× de tokens/s vs bf16** (§7.5), **sortie d'attention à cosinus 0,95–0,997** (§7.6), et une **projection apprise qui bat la PCA** sous décalage Q/K (§7.7). Le §7.8 corrige une idée reçue : le plafond du *score coarse* tient à la **projection bas-rang**, non à la quantification (NF4 et même INT8 n'y changent rien). Leviers réels : **meilleure projection** et **résidu 1-bit** ; pistes restantes : `d_s` plus grand et entraînement conjoint des projections avec un vrai modèle.
+### 7.9 Calibration de λ (dérive ΔP)
+
+`calibrate_lambda` confronte le poids du résidu `λ` à une attention **FP de référence**. En décomposant `score = coarse + λ·r` (où `r = d_s − 2·popcount` est indépendant de `λ`), le multiplicateur optimal sur la `λ` de la formule a une **forme close** (moindres carrés) : `α* = Σ rt·(λr) / Σ (λr)²`, avec `rt = ⟨Q,K⟩ − coarse`.
+
+| rho | α* (LS) | C_emp = α*·C_formule | RMSE @formule | RMSE @opt | Δout @formule |
+|---|---|---|---|---|---|
+| 0,10 | 4,18 | 0,327 | 1,37 | 1,26 | 0,006 |
+| 0,20 | 4,23 | 0,331 | 2,25 | 1,94 | 0,017 |
+| 0,30 | 4,24 | 0,332 | 3,29 | 2,79 | 0,036 |
+| 0,50 | 4,25 | 0,333 | 5,87 | 4,92 | 0,106 |
+| 0,70 | 4,26 | 0,334 | 9,90 | 8,26 | 0,262 |
+
+**Deux conclusions :**
+
+- **La forme `λ ∝ σ_E` est validée.** `α*` est quasi constant sur tout `rho` (4,18–4,26) : le facteur `σ_E` capture bien la dépendance ; le seul degré de liberté restant est la constante.
+- **La constante est ~4,2× trop petite.** `√(π/(2·d_s)) ≈ 0,078` sous-pondère le résidu ; la constante **calibrée** est **`C_emp ≈ 0,33`** (`d_s = 256`). L'optimiser réduit le RMSE de score (~15 %) et la dérive de sortie au fort `rho`.
+
+**Figer.** La forme est **figée** (validée) ; la constante calibrée est **documentée et épinglée par test** (`lambda_calibration_is_stable_and_pinned`). Le crate **garde la formule analytique par défaut** : le facteur 4,2 est mesuré sur données *synthétiques* à projections aléatoires, et l'optimum réel dépend du modèle (cf. §7.8). `calibrate_lambda` re-dérive `C` par déploiement ; `C ≈ 0,33` est la valeur recommandée une fois validée sur modèle réel.
+
+**Conclusion partielle.** Le mécanisme est **mathématiquement correct** (tests, dont les équivalences scalaire/AVX2) et **directionnellement validé** : HOT ≥ WARM, Soft-Paging quasi sans perte à faible `rho`, SIMD ×13, **~2,5× de tokens/s vs bf16** (§7.5), **sortie d'attention à cosinus 0,95–0,997** (§7.6), **projection apprise > PCA** sous décalage Q/K (§7.7), et **λ calibrée** (forme `∝σ_E` validée, constante corrigée ~4,2× → `C_emp ≈ 0,33`, §7.9). Le §7.8 corrige une idée reçue : le plafond du *score coarse* tient à la **projection bas-rang**, non à la quantification. Leviers réels : **meilleure projection** et **résidu 1-bit** (correctement pondéré une fois `λ` calibrée) ; pistes restantes : `d_s` plus grand et entraînement conjoint avec un vrai modèle.
 
 ---
 

@@ -21,15 +21,19 @@ mesures ont **réellement** établi. Toutes les valeurs sont reproductibles
 | Trafic mémoire vs bf16 ? | **2× moins d'octets/token → ~2,5× tokens/s** | §7.5 |
 | Débit SIMD (vs scalaire) ? | AVX2 **×11,5**, AVX-512 **×14,1** | §7.4 |
 | Projection apprise vs PCA (Q≠K) ? | WARM **0,16 → 0,86** | §7.7 |
+| Cache KV élastique sous budget (Soft-Paging) ? | pager **½** des tuiles HOT→WARM : sortie à **cos 0,9995** | §4 |
 
 ## 1. Ce qui est validé
 
 - **Le mécanisme est correct et implémentable.** Tuile 128 o sans gaspillage,
   score fusionné conforme à l'éq. (2.3), kernels scalaire/AVX2/AVX-512/NEON
-  **prouvés équivalents** (22 tests dont property/fuzz, clippy `-D warnings`, CI).
-- **Le « Soft-Paging » tient.** À faible énergie résiduelle, libérer le résidu
-  1-bit (WARM) est quasi sans perte ; le résidu redevient utile quand la base
-  bas-rang laisse passer de l'énergie. C'est exactement la politique HOT/WARM.
+  **prouvés équivalents** (41 tests dont property/fuzz, clippy `-D warnings`, CI).
+- **Le « Soft-Paging » tient — et tourne.** À faible énergie résiduelle, libérer
+  le résidu 1-bit (WARM) est quasi sans perte ; le résidu redevient utile quand
+  la base bas-rang laisse passer de l'énergie. La politique HOT/WARM/COLD est
+  désormais implémentée de bout en bout (`ccos::ElasticKvCache`, §4) : sous un
+  budget en octets, pager **la moitié** des tuiles (les plus faibles `σ_E`)
+  HOT→WARM laisse la **sortie d'attention** à **cos ≈ 0,9995** vs tout-HOT.
 - **La sortie d'attention est robuste** — le résultat le plus important. Même
   quand le ranking des scores plafonne (Spearman 0,79–0,90), la sortie
   `softmax·V` reste à **cosinus 0,95–0,997** : le softmax absorbe l'erreur de
@@ -82,4 +86,4 @@ mesures ont **réellement** établi. Toutes les valeurs sont reproductibles
    bout** (et non au seul niveau kernel).
 
 ---
-*Réf. : crate `scirust/` (30 tests dont property/fuzz + doctests, criterion, CI), paper `SLHAv2.md` §1–8.*
+*Réf. : crate `scirust/` (41 tests dont property/fuzz + doctests + calibration λ + CCOS, criterion, CI), paper `SLHAv2.md` §1–8.*

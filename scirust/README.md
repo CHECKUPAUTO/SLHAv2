@@ -14,9 +14,10 @@ Hybrid Attention) décrit dans [`../SLHAv2.md`](../SLHAv2.md).
 ## Build / test / mesure
 
 ```sh
-cargo test                                       # 30 tests : unitaires + intégration + property/fuzz + doctests
+cargo test                                       # 41 tests : unitaires + intégration + property/fuzz + doctests
                                                  #  (Hamming, layout 128 o, zero-point, WARM, sign-LSH, Jacobi,
-                                                 #   PCA, MX, NF4, sortie d'attention, SGD, SIMD≡scalaire ;
+                                                 #   PCA, MX, NF4, sortie d'attention, SGD, SIMD≡scalaire, calibration λ,
+                                                 #   CCOS Soft-Paging : page_out/evict/budget/recyclage de slots ;
                                                  #   property : fuzz SIMD≡scalaire, finitude, softmax, bornes dequant,
                                                  #   déterminisme, complément de signe, borne du résidu, codebook NF4)
 cargo bench                                      # micro-benchs criterion (scalaire / AVX2 / AVX-512)
@@ -25,6 +26,9 @@ cargo run --example measure_learned --release    # base apprise par PCA + codecs
 cargo run --example bench_vs_fp16 --release       # SLHA 128 o vs clé bf16 256 o : débit & trafic mémoire
 cargo run --example attention_fidelity --release  # fidélité de la sortie softmax·V (proxy perplexité)
 cargo run --example learn_projection --release    # projection apprise (task-aware) vs PCA
+cargo run --example calibrate_lambda --release    # calibration de λ (ΔP) vs référence FP
+cargo run --example cycles --release              # cycles/tuile (rdtsc) : scalaire/AVX2/AVX-512
+cargo run --example ccos_softpaging --release     # cache KV élastique : Soft-Paging HOT/WARM/COLD sous budget
 ```
 
 **Bibliothèque sans dépendance** : la lib n'ajoute rien à l'arbre d'un
@@ -51,6 +55,7 @@ faible énergie résiduelle, gains du résidu 1-bit modérés à `d_s = 256`.
 | Fichier | Rôle |
 |---|---|
 | `attention/slha_v2.rs` | Tuile `SciRustSlhaTile` (128 o), kernel `compute_score` (scalaire + AVX2 + AVX-512), codecs latents INT4 (MX) / NF4 |
+| `ccos.rs` | Cache KV élastique `ElasticKvCache` : Soft-Paging HOT/WARM/COLD, `page_out`/`evict`/`enforce_budget` (§4) |
 | `linalg.rs` | Décomposition propre symétrique (Jacobi) pour la PCA |
 | `learned.rs` | Projection bas-rang : PCA + **SGD task-aware** (`train_projection`) + génération de clés |
 | `scenario.rs` | Projection sign-LSH, génération de contexte à énergie résiduelle `rho` contrôlable |
@@ -64,3 +69,8 @@ faible énergie résiduelle, gains du résidu 1-bit modérés à `d_s = 256`.
 | `../examples/bench_vs_fp16.rs` | Débit / trafic mémoire : SLHA (128 o) vs clé bf16 (256 o) |
 | `../examples/attention_fidelity.rs` | Fidélité de la sortie `softmax·V` (proxy de perplexité) |
 | `../examples/learn_projection.rs` | Projection apprise (task-aware) vs PCA |
+| `../examples/calibrate_lambda.rs` | Calibration de λ (dérive ΔP) vs référence FP |
+| `../examples/cycles.rs` | Cycles/tuile (TSC via rdtsc) — complète le bench ns |
+| `../examples/ccos_softpaging.rs` | Démo CCOS : cache KV élastique sous budget, fidélité de la sortie |
+| `../tests/calibration.rs` | Test épinglant la calibration de λ (forme + constante) |
+| `../tests/ccos.rs` | Tests d'intégration du Soft-Paging (masquage résidu, budget, recyclage) |

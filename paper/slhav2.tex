@@ -1,0 +1,1012 @@
+%==============================================================================
+% SLHA v2 -- arXiv preprint
+% Author: Tarek Zekriti (ZEKRITI TAREK)
+% Self-contained: compiles with pdflatex (no external .bib, no custom .sty).
+%   pdflatex slhav2.tex ; pdflatex slhav2.tex
+%==============================================================================
+\documentclass[11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage[margin=1in]{geometry}
+\usepackage{caption}
+\usepackage[hidelinks]{hyperref}
+
+\hypersetup{
+  pdftitle={SLHA v2: Cache-Aware Hybrid Attention with Low-Rank Latents and 1-Bit Sign-LSH Residuals},
+  pdfauthor={Tarek Zekriti}
+}
+
+% ---- theorem environments ----------------------------------------------------
+\theoremstyle{plain}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+
+% ---- listings (Rust) ---------------------------------------------------------
+\definecolor{kw}{rgb}{0.10,0.10,0.55}
+\definecolor{cmt}{rgb}{0.30,0.45,0.30}
+\definecolor{str}{rgb}{0.55,0.20,0.10}
+\lstdefinelanguage{Rust}{
+  keywords={fn,let,mut,pub,struct,impl,for,if,else,return,in,const,usize,u8,u16,u32,u64,f32,i32,self,Self,as,bool,enum,match,unsafe},
+  sensitive=true,
+  morecomment=[l]{//},
+  morestring=[b]",
+}
+\lstset{
+  language=Rust,
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{kw}\bfseries,
+  commentstyle=\color{cmt}\itshape,
+  stringstyle=\color{str},
+  showstringspaces=false,
+  columns=fullflexible,
+  breaklines=true,
+  frame=single,
+  framesep=4pt,
+  rulecolor=\color{black!25},
+  aboveskip=8pt,belowskip=6pt,
+}
+
+% ---- shorthands --------------------------------------------------------------
+\newcommand{\dc}{d_c}
+\newcommand{\ds}{d_s}
+\newcommand{\dk}{d_k}
+\newcommand{\sigE}{\sigma_E}
+\newcommand{\inner}[2]{\langle #1, #2 \rangle}
+\newcommand{\popc}{\mathrm{popcount}}
+\newcommand{\sign}{\mathrm{sign}}
+\newcommand{\rms}{\mathrm{RMS}}
+
+\title{\textbf{SLHA v2: Cache-Aware Hybrid Attention with Low-Rank
+Latents and 1-Bit Sign-LSH Residuals for Memory-Bandwidth-Bound
+LLM Inference}}
+
+\author{
+  Tarek Zekriti\thanks{Independent Researcher. Correspondence:
+  \texttt{zekrititarek@gmail.com}.}\\
+  \small Independent Researcher
+}
+
+\date{June 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+Autoregressive inference of large language models (LLMs) is bounded by
+memory bandwidth: the key/value (KV) cache grows linearly with context
+length and saturates the interconnect long before the arithmetic units
+are busy. We present \textbf{SLHA~v2}, a cache-aware attention mechanism
+that decomposes each key into (i)~a shared low-rank latent base
+quantized to 4~bits and (ii)~a deterministic 1-bit sign-LSH residual.
+The two are combined in a single \emph{fused} score that adds a
+continuous dot product to a branchless Hamming-distance correction whose
+exactness we prove. The representation is packed into a hardware-aligned
+\textbf{128-byte tile with zero padding} that maps onto cache lines, and
+is managed by an elastic KV cache (\emph{CCOS Soft-Paging}) whose
+three-state \textsc{hot}/\textsc{warm}/\textsc{cold} machine bounds the
+memory footprint under a byte budget \emph{without I/O}, by freeing
+residuals where they matter least. We provide an open, zero-dependency
+Rust reference implementation (\textsc{SciRust}) with
+runtime-dispatched scalar / AVX2 / AVX-512 / NEON kernels proven
+equivalent by 37 automated tests. On reproducible synthetic benchmarks
+(fixed seeds) we measure: a 1-bit core that exactly realizes the
+signed-dot identity; an attention-\emph{output} cosine fidelity of
+$0.95$--$0.997$ versus full precision, \emph{despite} score-ranking
+Spearman plateauing at $0.79$--$0.90$ (the softmax absorbs score error);
+$\sim\!2.5\times$ more scored tokens/s than a \texttt{bf16} baseline at
+comparable memory bandwidth; SIMD speedups of $11.5\times$ (AVX2) and
+$14.1\times$ (AVX-512); and a learned, task-aware low-rank projection
+that lifts \textsc{warm} Spearman from $0.16$ to $0.86$ under query/key
+distribution shift. A controlled ablation shows that quantization width
+is \emph{not} the bottleneck (an INT8 reference does not beat INT4 on the
+coarse term)---the low-rank projection is. We position SLHA~v2 as a
+validated \emph{mechanism} and a systems substrate, and we are explicit
+about what remains unmeasured: real-model perplexity, hardware cache
+counters, and joint projection training.
+\end{abstract}
+
+\noindent\textbf{Keywords:} efficient inference, KV cache, low-rank
+attention, 1-bit quantization, locality-sensitive hashing, cache-aware
+data structures, SIMD.
+
+\section{Introduction}
+\label{sec:intro}
+
+Conventional attention pipelines treat the KV cache as a contiguous
+stream of high-precision tensors (FP16/BF16). During decoding, each new
+token re-reads the entire history from main memory into the registers of
+the CPU/GPU. The cost of this re-read is set by the cache hierarchy:
+
+\begin{itemize}[leftmargin=1.4em,itemsep=2pt]
+  \item \textbf{L1 (data):} $\sim\!1$ cycle, but tiny (32--64\,KiB/core);
+  \item \textbf{L2:} $\sim\!4$--$15$ cycles, $0.5$--$2$\,MiB/core;
+  \item \textbf{L3 / LLC:} shared, $\sim\!40$--$80$ cycles, tens to
+    hundreds of MiB.
+\end{itemize}
+
+If the KV layout does not align with these strata, the processor spends
+most of its time waiting on transfers (cache misses) rather than
+computing. This is the \emph{memory-bandwidth wall}: for long contexts,
+arithmetic intensity collapses and FLOPs become free relative to bytes.
+
+SLHA~v2 attacks the wall at the level of the data structure itself. Its
+contributions are:
+
+\begin{enumerate}[leftmargin=1.6em,itemsep=2pt]
+  \item \textbf{An asymmetric key representation} (\S\ref{sec:method}):
+    a shared low-rank latent (4-bit) plus a deterministic 1-bit
+    sign-LSH residual, fused into one score that combines a float dot
+    product with a Hamming correction. We prove the binary core is an
+    exact signed dot product (Lemma~\ref{lem:hamming}).
+  \item \textbf{A hardware-aligned 128-byte tile}
+    (\S\ref{sec:tile}) with \emph{zero padding}, whose 64-byte latent
+    sub-block is exactly one cache line.
+  \item \textbf{An elastic KV cache with Soft-Paging}
+    (\S\ref{sec:ccos}): a \textsc{hot}/\textsc{warm}/\textsc{cold}
+    state machine that bounds the footprint under a byte budget by
+    masking residuals ($O(1)$, no I/O, no allocation) before evicting
+    the most causally distant tokens.
+  \item \textbf{An open, zero-dependency reference implementation}
+    (\S\ref{sec:impl}) with runtime-dispatched SIMD kernels proven
+    equivalent to a scalar reference.
+  \item \textbf{A reproducible, deliberately honest evaluation}
+    (\S\ref{sec:eval}) that separates what is \emph{measured} from what
+    is \emph{targeted}, including negative results
+    (\S\ref{sec:discussion}).
+\end{enumerate}
+
+A guiding finding, established by ablation (\S\ref{sec:ablation}), is
+that the fidelity ceiling of the coarse term is set by the
+\emph{low-rank projection}, not by latent quantization width: doubling
+the bits (INT8) does not help, while a \emph{learned} projection lifts
+quality dramatically (\S\ref{sec:learned}). This reframes where future
+effort should go.
+
+\paragraph{Scope statement.}
+This paper reports the validation of a \emph{mechanism} on synthetic
+data with reproducible, seeded benchmarks. We do not claim end-to-end
+perplexity on a real model; \S\ref{sec:limits} states the boundaries
+precisely. We believe an honest account of a partially validated system
+is more useful than an overclaimed one.
+
+\section{Background and Related Work}
+\label{sec:related}
+
+\paragraph{Low-rank / latent KV compression.}
+Multi-head Latent Attention (MLA) in DeepSeek-V2~\cite{deepseekv2}
+projects keys and values through a shared low-rank bottleneck to shrink
+the KV cache. SLHA~v2 adopts the same low-rank \emph{base} but adds a
+quantized 1-bit residual to recover the information the bottleneck
+discards, and ties the layout to the cache line.
+
+\paragraph{KV-cache quantization.}
+GPTQ~\cite{gptq}, AWQ~\cite{awq}, and KIVI~\cite{kivi} quantize weights
+or KV entries to low bit-width. NF4 (from QLoRA~\cite{qlora}) uses a
+normal-float codebook. SLHA~v2 uses signed INT4 (with optional grouped
+micro-scaling and NF4) for the latent, but our ablation
+(\S\ref{sec:ablation}) shows quantization width is not the limiting
+factor here.
+
+\paragraph{1-bit and salient-aware quantization.}
+BiLLM~\cite{billm} pushes post-training quantization toward 1~bit by
+isolating salient weights in higher precision. SLHA~v2's residual is
+1-bit \emph{by construction} (a sign-LSH code), and \S\ref{sec:future}
+discusses a BiLLM-style salient extension as future work.
+
+\paragraph{Locality-sensitive hashing.}
+Sign-LSH / SimHash~\cite{charikar} estimates the angle between two
+vectors from the agreement of random hyperplane signs; the underlying
+random projection is justified by the Johnson--Lindenstrauss
+lemma~\cite{jl}. SLHA~v2's residual is a sign-LSH code of the
+reconstruction error, and the fused score reads it back via a Hamming
+distance.
+
+\paragraph{KV eviction and paging.}
+H2O~\cite{h2o} and StreamingLLM~\cite{streamingllm} drop or retain KV
+entries by heuristics; PagedAttention/vLLM~\cite{vllm} manages KV memory
+in pages. SLHA~v2's Soft-Paging adds an intermediate, near-lossless
+\textsc{warm} state---freeing only the 1-bit residual---\emph{before}
+resorting to eviction, and chooses what to free by residual energy.
+
+\section{The SLHA v2 Mechanism}
+\label{sec:method}
+
+\subsection{Asymmetric decomposition}
+SLHA~v2 splits the representation of each key into two asymmetric
+components: a compact semantic base and a high-frequency binary
+correction. Let $x_j \in \mathbb{R}^{d_{\text{model}}}$ be the
+activation of context token $j$.
+
+\subsection{Multi-head latent compression}
+A shared down-projection maps $x_j$ into a latent bottleneck of
+dimension $\dc$:
+\begin{equation}
+  h_{KV,j} \;=\; W_{\text{down}}\, x_j \;\in\; \mathbb{R}^{\dc}.
+\end{equation}
+Each head $n$ reconstructs a \emph{coarse key} via a head-specific
+up-projection $W_{\text{up},K}^{(n)} \in \mathbb{R}^{\dk \times \dc}$:
+\begin{equation}
+  K_{\text{coarse},j}^{(n)} \;=\; W_{\text{up},K}^{(n)}\, h_{KV,j}.
+\end{equation}
+
+\subsection{Deterministic 1-bit sign-LSH residual}
+The reconstruction error
+$E_j^{(n)} = K_{\text{real},j}^{(n)} - K_{\text{coarse},j}^{(n)}$ is
+captured by a fixed random orthogonal Johnson--Lindenstrauss projection
+$Z \in \mathbb{R}^{\ds \times \dk}$, keeping only the sign on $\ds$
+dimensions:
+\begin{equation}
+  B_j^{(n)} \;=\; \sign\!\left( Z\, E_j^{(n)} \right) \;\in\; \{-1,+1\}^{\ds}.
+\end{equation}
+$Z$ is stable and pseudo-random (seeded at start-up); $B_j^{(n)}$ is
+stored as compact bitmaps. With $\ds = 256$ the residual occupies
+exactly 32~bytes (four 64-bit words).
+
+\subsection{Fused float--binary score}
+The unnormalized attention score between query $Q_i^{(n)}$ and cached
+token $j$ combines a continuous inner product and a binary inner product
+accelerated by bitwise logic:
+\begin{equation}
+  s_{ij}^{(n)} \;=\;
+  \underbrace{\inner{Q_i^{(n)} W_{\text{up},K}^{(n)}}{h_{KV,j}}}_{\text{coarse (continuous)}}
+  \;+\;
+  \lambda \cdot
+  \underbrace{\Big[\,\ds - 2\,\popc\big(p(Q_i^{(n)}) \oplus B_j^{(n)}\big)\Big]}_{\text{residual (1-bit)}},
+  \label{eq:score}
+\end{equation}
+where $\oplus$ is bitwise XOR, $\popc$ counts set bits, and
+$p(Q_i^{(n)}) = \mathrm{pack\_sign}(Z\,Q_i^{(n)})$ packs the query's
+sign-LSH code into the same bitmap format. The next lemma shows the
+bracketed term is an \emph{exact} signed dot product, not an
+approximation of one.
+
+\begin{lemma}[Hamming identity]
+\label{lem:hamming}
+Let $a,b \in \{0,1\}^{\ds}$ encode signs via $\sigma(0)=+1$,
+$\sigma(1)=-1$, and let $s_a, s_b \in \{-1,+1\}^{\ds}$ be the
+corresponding sign vectors. Then
+\begin{equation}
+  \ds - 2\,\popc(a \oplus b) \;=\; \sum_{k=1}^{\ds} s_{a,k}\, s_{b,k}
+  \;=\; \inner{s_a}{s_b}.
+\end{equation}
+\end{lemma}
+\begin{proof}
+Bit $k$ of $a \oplus b$ is $1$ iff $a_k \neq b_k$, i.e.\ iff
+$s_{a,k} s_{b,k} = -1$. Let $D = \popc(a\oplus b)$ be the number of
+disagreements. Agreements contribute $+1$ and disagreements $-1$, so
+$\inner{s_a}{s_b} = (\ds - D)\cdot(+1) + D\cdot(-1) = \ds - 2D$.
+\end{proof}
+
+This identity is verified against a brute-force reference for $2000$
+random bitmap pairs (test \texttt{hamming\_identity\_matches\_sign\_dot},
+\S\ref{sec:eval}). It is what makes the residual term a single XOR
+followed by a population count---two of the cheapest operations on any
+modern ISA.
+
+\subsection{Dynamic $\lambda$ calibration}
+\label{sec:lambda}
+The weight $\lambda$ of the binary correction is not fixed. From the
+residual energy $\sigE = \rms(E_j^{(n)})$ the spec sets
+\begin{equation}
+  \lambda \;=\; \sigE \cdot \sqrt{\tfrac{\pi}{2\,\ds}}.
+  \label{eq:lambda}
+\end{equation}
+The \emph{shape} $\lambda \propto \sigE$ is validated empirically
+(\S\ref{sec:calib}): the closed-form optimal multiplier against a
+full-precision reference is near-constant across residual energy. The
+analytic \emph{constant} $\sqrt{\pi/(2\ds)} \approx 0.078$ at $\ds=256$
+under-weights the residual by $\approx 4.2\times$; the calibrated
+constant is $C_{\text{emp}} \approx 0.33$. We keep the analytic form as
+the conservative default and document the calibrated constant
+(\S\ref{sec:calib}).
+
+\section{Hardware-Aware Tile Layout}
+\label{sec:tile}
+
+\subsection{The 128-byte tile}
+SLHA~v2 stores each (key, residual, metadata) triple in a single
+\texttt{\#[repr(C)]} structure whose total size is exactly
+128~bytes \emph{with zero padding}. Its alignment is \emph{cache-line-aware}
+and resolved at compile time from the target architecture
+(\S\ref{sec:cachemap}). Table~\ref{tab:tile} gives the layout.
+
+\begin{table}[t]
+\centering
+\caption{The \texttt{SciRustSlhaTile} layout ($\dc=128$, $\ds=256$).
+Total $= 64+32+32 = 128$ bytes; \texttt{align\_of} is $128$ on AArch64
+and $64$ elsewhere (size is $128$ either way); verified by
+test \texttt{tile\_is\_exactly\_128\_bytes\_zero\_padding} and by AArch64
+cross-compilation.}
+\label{tab:tile}
+\small
+\begin{tabular}{@{}llr l@{}}
+\toprule
+Field & Type & Bytes & Role \\
+\midrule
+\texttt{latent\_kv}       & \texttt{[u8; 64]}  & 64 & 128 INT4/NF4 latent dims (2/byte) \\
+\texttt{residual\_bitmap} & \texttt{[u64; 4]}  & 32 & sign-LSH residual (256 bits) \\
+\texttt{scale}            & \texttt{f32}       & 4  & global INT4 dequant scale \\
+\texttt{dynamic\_lambda}  & \texttt{f32}       & 4  & residual weight $\lambda$ (Eq.~\ref{eq:lambda}) \\
+\texttt{residual\_sigma}  & \texttt{f32}       & 4  & per-tile $\sigE$ (for $\lambda$) \\
+\texttt{token\_id}        & \texttt{u32}       & 4  & token identifier \\
+\texttt{position}         & \texttt{u32}       & 4  & causal position \\
+\texttt{head\_id}         & \texttt{u16}       & 2  & attention head \\
+\texttt{flags}            & \texttt{u16}       & 2  & \textsc{hot}/\textsc{warm}/NF4 \\
+\texttt{group\_scales}    & \texttt{[u8; 8]}   & 8  & per-group MX micro-scales \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The signed INT4 dequantization uses a baked-in zero point,
+$\hat v_d = (\text{nibble}_d - 8)\cdot \texttt{scale}$, so the latent
+represents negative values without a separate zero-point array. Optional
+grouped micro-scaling (MX) stores one \texttt{u8} scale per group of 16
+dims in \texttt{group\_scales}, giving effective scale
+$\texttt{scale}\cdot \texttt{group\_scales}[g]/255$.
+
+\begin{lstlisting}[caption={Core tile and fused score (abridged from
+\texttt{scirust/src/attention/slha\_v2.rs}).},captionpos=b]
+// Cache-line-aware alignment, resolved at compile time (size is 128 either way).
+#[cfg_attr(target_arch = "aarch64",      repr(C, align(128)))] // one 128B line
+#[cfg_attr(not(target_arch = "aarch64"), repr(C, align(64)))]  // two 64B lines
+pub struct SciRustSlhaTile {
+    pub latent_kv: [u8; 64],         // INT4/NF4 latent (128 dims)
+    pub residual_bitmap: [u64; 4],   // sign-LSH residual (256 bits)
+    pub scale: f32, pub dynamic_lambda: f32, pub residual_sigma: f32,
+    pub token_id: u32, pub position: u32,
+    pub head_id: u16, pub flags: u16,
+    pub group_scales: [u8; 8],
+}
+
+// score = <q_coarse, dequant(latent)>  +  lambda * (d_s - 2*popcount(q_sign ^ B))
+// Branchless Hamming reduction; one vpopcntq over 256 bits on AVX-512 VPOPCNTDQ,
+// else count_ones() (-> POPCNT/CNT). Runtime-selected; bit-equivalent by test.
+pub fn hamming_distance(a: &[u64; 4], b: &[u64; 4]) -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx512vpopcntdq") && is_x86_feature_detected!("avx512vl") {
+        return unsafe { hamming_vpopcntdq(a, b) };
+    }
+    (0..4).map(|w| (a[w] ^ b[w]).count_ones()).sum()
+}
+\end{lstlisting}
+
+\subsection{Cache mapping}
+\label{sec:cachemap}
+The 64-byte latent sub-block is exactly one cache line and holds all 128
+semantic dimensions; it is this sub-block---not the whole tile---that
+feeds the arithmetic unit in a single line load. Queries are pre-loaded
+into L1 and the context tiles are swept sequentially, so the access
+pattern is a pure streaming read with unit stride.
+
+Because cache-line width differs across our targets---64~bytes on
+mainstream x86-64, 128~bytes on Jetson Thor-class AArch64
+(Neoverse-V3AE)---we resolve the alignment attribute at compile time from
+\texttt{target\_arch} via \texttt{cfg\_attr} (listing above):
+\texttt{align(128)} on AArch64, so a tile is \emph{exactly one} cache line
+and a single line fill on the LPDDR5X bus; \texttt{align(64)} elsewhere, so
+a tile spans two lines. The \emph{size} is 128~bytes in both cases
+(128 is a multiple of both alignments), so zero padding holds regardless of
+target. No \texttt{build.rs} is needed because \texttt{target\_arch} is a
+compile-time \texttt{cfg}; a build script would only help to probe the
+\emph{host's} actual line size under \texttt{-C target-cpu=native}
+(\S\ref{sec:future}). We cross-compile to
+\texttt{aarch64-unknown-linux-gnu} in CI so the AArch64 layout and NEON
+kernel are type-checked.
+
+\section{CCOS Elastic KV-Cache and Soft-Paging}
+\label{sec:ccos}
+
+SLHA~v2's decomposition lets the runtime apply a \emph{boundedness}
+policy as a fine-grained elasticity of fidelity rather than all-or-nothing
+eviction. Each tile occupies one of three states
+(Table~\ref{tab:states}).
+
+\begin{table}[t]
+\centering
+\caption{Soft-Paging states. Footprint is the \emph{logical} byte cost
+used by the budget.}
+\label{tab:states}
+\small
+\begin{tabular}{@{}llr@{}}
+\toprule
+State & Behavior & Footprint \\
+\midrule
+\textsc{hot}  & full fused score (latent + 1-bit residual) & 128 B \\
+\textsc{warm} & residual freed ($\lambda=0$, \texttt{FLAG\_WARM}); score $=$ coarse only & 96 B ($-25\%$) \\
+\textsc{cold} & evicted from the working set; slot recycled on next insert & 0 B \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{State machine and budget enforcement}
+A reference manager, \texttt{ccos::ElasticKvCache}, holds tiles in a
+contiguous arena. \texttt{enforce\_budget()} bounds the logical footprint
+under a byte budget in two phases:
+
+\begin{enumerate}[leftmargin=1.6em,itemsep=2pt]
+  \item \textbf{Page} \textsc{hot}$\to$\textsc{warm} in
+    \texttt{PageOutPolicy} order. The default \emph{hybrid} policy pages
+    the lowest-$\sigE$ tiles first---their 1-bit residual matters least,
+    so \textsc{warm} is near-lossless there (\S\ref{sec:scorefp}).
+    Masking is $O(1)$: zero the 32-byte bitmap and set a flag, no
+    allocation, no I/O.
+  \item \textbf{Evict} live tiles $\to$\textsc{cold} if still over
+    budget, \emph{always oldest-first} (causal distance). Dropping a
+    token is the harder loss, so it targets the most distant context
+    regardless of $\sigE$. The freed slot is recycled via a free list.
+\end{enumerate}
+
+This two-key design (page by energy, evict by age) is pinned by tests
+(\S\ref{sec:eval}). A production CCOS would snapshot \textsc{cold} tiles
+to an append-only event log; we do not simulate that persistence here.
+
+\subsection{Soft-Paging fidelity}
+The example \texttt{ccos\_softpaging} streams 8192 tiles (1024\,KiB
+all-\textsc{hot}) and measures the effect on the attention
+\emph{output} (Table~\ref{tab:softpaging}). Paging \emph{half} the
+tiles---the lowest-$\sigE$ ones---to \textsc{warm} leaves the output at
+cosine $\approx 0.9995$ versus all-\textsc{hot}: the central benefit of
+Soft-Paging is to bound memory by freeing the residual where it weighs
+least, with no I/O and no dropped token.
+
+\begin{table}[t]
+\centering
+\caption{Soft-Paging under a byte budget (8192 tiles, $d_v=64$).}
+\label{tab:softpaging}
+\small
+\begin{tabular}{@{}lllll@{}}
+\toprule
+Regime & Budget & \textsc{hot}/\textsc{warm}/\textsc{cold} & Footprint & $\cos(\text{out}, \text{all-}\textsc{hot})$ \\
+\midrule
+A --- paging only      & 896\,KiB (112 B/tile) & 4096 / 4096 / 0    & 896\,KiB (88\%)      & $\mathbf{0.9995}$ \\
+B --- forced eviction  & 320\,KiB (40 B/tile)  & 0 / 3413 / 256     & 319\,KiB $\le$ budget & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Reference Implementation: SciRust}
+\label{sec:impl}
+
+The kernel is written in Rust (2021 edition) with a no-allocation
+invariant in the hot loops. Salient engineering properties:
+
+\begin{itemize}[leftmargin=1.4em,itemsep=2pt]
+  \item \textbf{Runtime SIMD dispatch.} The coarse dot product (128-dim
+    INT4 dequant $+$ FMA) has scalar, AVX2, AVX-512 (x86\_64) and NEON
+    (aarch64) paths, selected at run time via
+    \texttt{is\_x86\_feature\_detected!} (order AVX-512 $>$ AVX2 $>$
+    scalar) with a portable fallback. There is \emph{no} compile-time
+    feature gating of correctness.
+  \item \textbf{Branchless residual.} The Hamming term is a fixed
+    four-word reduction with no data branches. It dispatches at run time to
+    a single \texttt{vpopcntq} over all 256 residual bits
+    (\texttt{\_mm256\_popcnt\_epi64}) on x86-64 CPUs advertising AVX-512
+    \textsc{vpopcntdq}+\textsc{vl}, otherwise to \texttt{count\_ones()}
+    ($\to$\,\texttt{POPCNT}/\texttt{CNT}). The two are asserted bit-equal on
+    capable hardware and compile-checked elsewhere.
+  \item \textbf{Zero dependencies.} The library has no runtime
+    dependencies; \texttt{criterion} is a dev-only dependency for
+    micro-benchmarks.
+  \item \textbf{Tested equivalence.} 41 tests (unit, integration,
+    property/fuzz, doctests, $\lambda$ calibration, Soft-Paging) assert,
+    among other things, SIMD $\equiv$ scalar (randomized fuzz; AVX2,
+    AVX-512, VPOPCNTDQ, NEON), the budget invariants of
+    \texttt{enforce\_budget} over 300 randomized configurations
+    ($\texttt{live\_bytes}\le\text{budget}$, consistent accounting, slot
+    recycling), score finiteness, the Hamming identity, and conformance to
+    Eq.~\eqref{eq:score}. The NEON and VPOPCNTDQ paths are checked by
+    cross-compilation / feature-gated execution. Continuous integration runs
+    \texttt{fmt}\,+\,\texttt{clippy -D warnings}\,+\,tests\,+\,bench
+    compilation\,+\,AArch64 cross-compile.
+\end{itemize}
+
+\section{Experimental Evaluation}
+\label{sec:eval}
+
+\subsection{Setup and methodological honesty}
+\label{sec:setup}
+All numbers below are reproducible with fixed seeds. Measurements use
+\emph{synthetic} data; the sign-LSH projection $Z$ is \emph{random} by
+design. In \S\ref{sec:bincore}--\S\ref{sec:scorefp} the low-rank base is
+assumed ideal ($W_{\text{down}}, W_{\text{up}}$ not learned) and we
+isolate the INT4-quantization $+$ 1-bit-residual $+$ ranking machinery;
+$\rho = \lVert e\rVert / \lVert k_{\text{real}}\rVert$ denotes the energy
+fraction the base leaves to the residual.
+\S\ref{sec:learned}--\S\ref{sec:taskaware} lift the ideal-base
+assumption by learning the base (PCA, then task-aware SGD).
+Throughput is reported on a \emph{shared} x86\_64 bench (treat as an
+order of magnitude). We do \emph{not} report real-model perplexity or
+hardware cache counters; \S\ref{sec:limits} explains why.
+
+\subsection{Binary core fidelity (sign-LSH, $\ds=256$)}
+\label{sec:bincore}
+Over pairs spanning the full angular range, the 1-bit estimator tracks
+the true cosine with Spearman $> 0.9$ (test-proven). In the
+\emph{realistic} regime, where the residual is near-orthogonal to the
+query, $256$ bits give only moderate resolution: Spearman(residual,
+$\cos\theta) \approx 0.67$. This is a genuine limit---one bit per
+hyperplane resolves nearly orthogonal directions poorly---and motivates
+larger $\ds$ as future work.
+
+\subsection{Full score vs.\ full-precision ground truth}
+\label{sec:scorefp}
+Table~\ref{tab:scorefp} reports rank fidelity of the full SLHA score
+($N=512$ tokens, fixed query) against FP ground truth, as a function of
+$\rho$.
+
+\begin{table}[t]
+\centering
+\caption{Score rank fidelity vs.\ FP (ideal base). \textsc{hot}
+$=$ latent $+$ residual; \textsc{warm} $=$ latent only.}
+\label{tab:scorefp}
+\small
+\begin{tabular}{@{}cccccc@{}}
+\toprule
+$\rho$ & \textsc{hot} Spearman & \textsc{hot} top-16 & \textsc{warm} Spearman & \textsc{warm} top-16 \\
+\midrule
+0.05 & 0.987 & 0.875 & 0.987 & 0.875 \\
+0.10 & 0.983 & 0.750 & 0.982 & 0.750 \\
+0.20 & 0.966 & 0.750 & 0.961 & 0.688 \\
+0.30 & 0.937 & 0.625 & 0.925 & 0.562 \\
+0.50 & 0.844 & 0.500 & 0.811 & 0.438 \\
+0.70 & 0.702 & 0.375 & 0.627 & 0.250 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two observations. (i)~At low $\rho \le 0.1$, \textsc{hot} $\approx$
+\textsc{warm}: freeing the residual is near-lossless when the base
+captures most of the energy---exactly the condition under which CCOS
+moves a tile to \textsc{warm}. (ii)~The residual helps everywhere
+(\textsc{hot} $\ge$ \textsc{warm}), with the gap widening as $\rho$ grows
+($+0.08$ Spearman, $+12$ pts top-16 at $\rho=0.7$), but the gain is
+modest at $256$ bits.
+
+\subsection{Learned PCA base and grouped quantization}
+\label{sec:learned}
+Lifting the ideal-base assumption, the base is learned by PCA
+(best rank-$\dc$ linear reconstruction, Eckart--Young~\cite{eckartyoung})
+on synthetic keys with controllable spectrum; $Z$ stays random
+(Table~\ref{tab:pca}).
+
+\begin{table}[t]
+\centering
+\caption{Learned PCA base ($d_{\text{model}}=256$, latent $128$,
+$\ds=256$); INT4 with grouped MX micro-scales.}
+\label{tab:pca}
+\small
+\begin{tabular}{@{}cccccc@{}}
+\toprule
+decay & energy captured & \textsc{hot} Spearman & \textsc{hot} top-16 & \textsc{warm} Spearman & \textsc{warm} top-16 \\
+\midrule
+0.99 & 97.6\% & 0.788 & 0.562 & 0.703 & 0.438 \\
+0.97 & 99.7\% & 0.814 & 0.375 & 0.700 & 0.312 \\
+0.93 & 99.5\% & 0.884 & 0.438 & 0.609 & 0.188 \\
+0.85 & 99.1\% & 0.905 & 0.562 & 0.871 & 0.500 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textsc{hot} plateaus at $0.79$--$0.90$ despite $97$--$99.7\%$ captured
+energy: reconstruction energy is not score fidelity. \textsc{hot} $>$
+\textsc{warm} everywhere, by as much as $+0.28$ Spearman (decay $0.93$).
+Grouped MX cuts reconstruction error by $>2\times$ (test-proven) but the
+end-to-end gain is marginal; whitening the latent \emph{degrades} it
+($0.859 \to 0.750$). The plateau is examined in \S\ref{sec:ablation}.
+
+\subsection{Attention-output fidelity (the headline result)}
+\label{sec:output}
+Rank fidelity is a proxy; what a model consumes is the attention
+\emph{output} $\mathrm{out} = \mathrm{softmax}(QK^\top/\sqrt{d})\,V$.
+Table~\ref{tab:output} reports cosine and relative-$L_2$ between the FP
+output and the SLHA output (PCA base, $d=256$, $N=512$, mean over 64
+queries, $d_v=64$).
+
+\begin{table}[t]
+\centering
+\caption{Attention-output fidelity --- the closest accessible proxy for
+perplexity drift.}
+\label{tab:output}
+\small
+\begin{tabular}{@{}ccll@{}}
+\toprule
+decay & energy & \textsc{hot} $\cos$ / rel$L_2$ & \textsc{warm} $\cos$ / rel$L_2$ \\
+\midrule
+0.99 & 97.6\% & 0.948 / 0.318 & 0.943 / 0.333 \\
+0.95 & 99.6\% & 0.989 / 0.147 & 0.988 / 0.154 \\
+0.90 & 99.4\% & 0.994 / 0.108 & 0.993 / 0.114 \\
+0.80 & 98.9\% & 0.997 / 0.078 & 0.996 / 0.082 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+This is the most important result. The output is far more robust than
+the ranking suggested: where score Spearman plateaued at $0.79$--$0.90$,
+the output cosine reaches $0.95$--$0.997$. The reason is that the softmax
+averages values, so score errors between tokens of similar weight cancel.
+\textsc{hot} $\ge$ \textsc{warm} throughout (small gap at these high
+decays, where the residual matters little).
+
+\subsection{Task-aware learned projection vs.\ PCA}
+\label{sec:taskaware}
+PCA picks the highest-variance directions of the \emph{keys} and ignores
+the \emph{query} distribution. When $Q$ and $K$ favor different
+subspaces, a projection trained to preserve the \emph{score}
+$\inner{Q}{K}$ (not key reconstruction) wins. \texttt{train\_projection}
+performs this descent with a closed-form gradient
+($a=PQ$, $b=PK$, $r=\inner{Q}{K}-\inner{a}{b}$,
+$\partial r^2/\partial P = -2r(bQ^\top + aK^\top)$), evaluated on an
+adversarial case (orthonormal factors split into high key-variance /
+high query-weight halves). We measure in \textsc{warm} to isolate the
+projection (Table~\ref{tab:taskaware}).
+
+\begin{table}[t]
+\centering
+\caption{Task-aware learned projection vs.\ PCA under deliberate $Q/K$
+shift. SGD score loss $28.8 \to 5.1$.}
+\label{tab:taskaware}
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Projection & \textsc{warm} Spearman & \textsc{hot} Spearman & output $\cos$ \\
+\midrule
+PCA            & 0.161 & 0.325 & 0.947 \\
+\textbf{Learned} & \textbf{0.859} & \textbf{0.863} & \textbf{0.985} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Learning beats PCA decisively (\textsc{warm} $0.86$ vs.\ $0.16$): the
+task-aware projection reallocates low-rank capacity toward the directions
+that matter for the score. Caveats: synthetic data with deliberate $Q/K$
+shift; when $Q$ and $K$ share statistics, PCA is already near-optimal;
+and this is an SGD proof-of-concept on $P$ alone, not joint training with
+a real model.
+
+\subsection{Ablation: quantization is not the bottleneck}
+\label{sec:ablation}
+The latent can also be NF4 (normal-float codebook, same 4-bit budget,
+same 128-byte tile). We add an INT8 reference (coarse only, hypothetical
+192-byte tile) to isolate bit-width (Table~\ref{tab:ablation}).
+
+\begin{table}[t]
+\centering
+\caption{Latent codec ablation at decay $0.93$.}
+\label{tab:ablation}
+\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+Latent codec & \textsc{hot} Spearman & \textsc{warm} Spearman \\
+\midrule
+INT4 uniform (1 scale) & 0.879 & 0.603 \\
+INT4 grouped (MX)      & 0.884 & 0.609 \\
+NF4 grouped            & 0.885 & 0.610 \\
+\textbf{INT8} (ref, $2\times$ bytes) & --- & \textbf{0.606} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+NF4 lowers reconstruction error (test-proven) but the end-to-end gain is
+null-to-marginal ($0.884 \to 0.885$). Crucially, INT8 does \emph{not}
+beat INT4 on \textsc{warm} ($\approx 0.61$): doubling the bits does not
+lift the coarse ceiling. \textbf{The limiting factor is therefore the
+low-rank projection, not latent quantization.} This corrects an earlier
+hypothesis that blamed INT4, and refocuses the real levers on (a)~a
+better (learned) projection and (b)~the 1-bit residual.
+
+\subsection{$\lambda$ calibration}
+\label{sec:calib}
+\texttt{calibrate\_lambda} compares the residual weight to an FP
+reference. Writing $\text{score} = \text{coarse} + \lambda r$ with
+$r = \ds - 2\,\popc$ (independent of $\lambda$), the optimal multiplier
+on the formula's $\lambda$ has the closed form
+$\alpha^\star = \sum r_t (\lambda r) / \sum (\lambda r)^2$ with
+$r_t = \inner{Q}{K} - \text{coarse}$ (Table~\ref{tab:calib}).
+
+\begin{table}[t]
+\centering
+\caption{$\lambda$ calibration. $C_{\text{emp}} = \alpha^\star
+\cdot \sqrt{\pi/(2\ds)}$.}
+\label{tab:calib}
+\small
+\begin{tabular}{@{}cccccc@{}}
+\toprule
+$\rho$ & $\alpha^\star$ (LS) & $C_{\text{emp}}$ & RMSE @formula & RMSE @opt & $\Delta$out @formula \\
+\midrule
+0.10 & 4.18 & 0.327 & 1.37 & 1.26 & 0.006 \\
+0.20 & 4.23 & 0.331 & 2.25 & 1.94 & 0.017 \\
+0.30 & 4.24 & 0.332 & 3.29 & 2.79 & 0.036 \\
+0.50 & 4.25 & 0.333 & 5.87 & 4.92 & 0.106 \\
+0.70 & 4.26 & 0.334 & 9.90 & 8.26 & 0.262 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The shape $\lambda \propto \sigE$ is validated ($\alpha^\star$ constant
+at $4.18$--$4.26$). The analytic constant is $\approx 4.2\times$ too
+small; the calibrated constant is $C_{\text{emp}} \approx 0.33$ at
+$\ds=256$, which cuts score RMSE by $\sim 15\%$. We expose this value as
+an opt-in (\texttt{LAMBDA\_C\_CALIBRATED}, with a test asserting its
+optimal multiplier is $\approx 1$), but the crate keeps the analytic form
+as default for two reasons: the $4.2\times$ factor is measured on
+synthetic data and the true optimum is model-dependent; and calibration
+minimizes score \emph{magnitude} (RMSE), a different objective from the
+\emph{ranking} (top-$k$/Spearman) that attention ultimately consumes, so
+over-weighting the directionally-noisy residual could trade ranking for
+magnitude.
+
+\subsection{Throughput (SIMD)}
+\label{sec:throughput}
+Each kernel path has an equivalence test against the scalar reference
+(Table~\ref{tab:simd}).
+
+\begin{table}[t]
+\centering
+\caption{Score throughput on a shared x86\_64 bench (order of
+magnitude).}
+\label{tab:simd}
+\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+Path & Throughput & Ratio \\
+\midrule
+Scalar (reference)          & $\sim$2.9 M scores/s  & $1\times$ \\
+AVX2                        & $\sim$33.9 M scores/s & $\mathbf{11.5\times}$ \\
+AVX-512 (16-wide FMA/group) & $\sim$41.6 M scores/s & $\mathbf{14.1\times}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The speedup exceeds the nominal $8\times$/$16\times$ because the scalar
+path also paid a branchy INT4 dequant that SIMD fuses. AVX-512 adds only
+$\sim\!23\%$ over AVX2: the kernel is short (128 dims) and bound by
+nibble-unpacking/loads, not FMA width. In reference cycles
+(\texttt{rdtsc}): $\sim$942 cyc/tile scalar, $\sim$89 AVX2, $\sim$71
+AVX-512. A NEON path exists and is cross-compile-verified but not timed
+(no ARM hardware on this bench).
+
+\subsection{Memory traffic vs.\ a bf16 baseline}
+\label{sec:membw}
+\texttt{bench\_vs\_fp16} compares scoring an SLHA tile (128 B/token)
+against a dot product on a bf16 key ($\dk \cdot 2 = 256$ B/token), both
+in AVX2 (Table~\ref{tab:membw}).
+
+\begin{table}[t]
+\centering
+\caption{SLHA (128 B/token) vs.\ bf16 (256 B/token), AVX2.}
+\label{tab:membw}
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Context (tokens) & footprint SLHA / bf16 & SLHA & bf16 \\
+\midrule
+8\,192      & 1 / 2\,MiB    & 42.4 M/s & 17.0 M/s \\
+65\,536     & 8 / 16\,MiB   & 40.1 & 16.9 \\
+262\,144    & 32 / 64\,MiB  & 35.4 & 14.0 \\
+1\,048\,576 & 128 / 256\,MiB & 29.9 & 13.8 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+SLHA scores $\sim\!2.5\times$ more tokens/s at comparable memory
+bandwidth: reading $2\times$ fewer bytes/token (plus a shorter INT4
+unpack than bf16 decode) converts directly into throughput---the
+bandwidth-wall thesis, verified at the kernel level. Throughput decays as
+context grows (42 $\to$ 30 M/s), an indirect cache-residency effect.
+\textbf{Honesty:} the LLC is 260\,MB on this bench, so we do not saturate
+DRAM; the gain comes from byte volume and uops, not a DRAM limit. On a
+smaller LLC or a genuinely DRAM-bound decode, SLHA's advantage would be
+larger.
+
+\section{Discussion: real levers and false levers}
+\label{sec:discussion}
+Synthesizing the evaluation:
+
+\begin{itemize}[leftmargin=1.4em,itemsep=2pt]
+  \item \textbf{Lever \#1 --- the low-rank projection.} A learned,
+    task-aware projection beats PCA decisively under $Q/K$ shift
+    (\textsc{warm} $0.16 \to 0.86$, \S\ref{sec:taskaware}).
+  \item \textbf{Lever \#2 --- the 1-bit residual.} It recovers much of
+    what the coarse term misses (\textsc{hot} $\gg$ \textsc{warm} at high
+    $\rho$), once $\lambda$ is calibrated.
+  \item \textbf{False lever --- latent bit-width.} INT8 does not beat
+    INT4 on the coarse term; NF4 and MX grouping improve reconstruction
+    but barely move end-to-end ranking (\S\ref{sec:ablation}).
+  \item \textbf{False lever --- SIMD width.} AVX-512 adds only
+    $\sim\!23\%$ over AVX2; the kernel is unpack/load-bound, not
+    FMA-width-bound.
+\end{itemize}
+
+\noindent\textbf{Assumed negative results.} Latent whitening degrades
+fidelity; MX/NF4 grouping yields marginal end-to-end gains; and our own
+earlier conclusion that INT4 was the bottleneck was refuted by the INT8
+measurement and corrected. We report these because they are as
+informative as the positive results.
+
+\section{Limitations and Threats to Validity}
+\label{sec:limits}
+We are explicit about the boundaries of these results.
+
+\begin{itemize}[leftmargin=1.4em,itemsep=2pt]
+  \item \textbf{Synthetic data, random $Z$.} All fidelity numbers use
+    synthetic keys/queries and a random sign-LSH projection. They
+    validate the \emph{mechanism}, not (yet) quality on a real model.
+  \item \textbf{No real-model perplexity.} The closest proxy is the
+    attention-output cosine (\S\ref{sec:output}); a real perplexity
+    measurement requires a model and dataset not available in our
+    sandbox.
+  \item \textbf{No hardware cache counters.} \texttt{perf} is
+    unavailable (\texttt{perf\_event\_paranoid=2}); cache effects are
+    shown only indirectly via throughput decay with context size
+    (\S\ref{sec:membw}).
+  \item \textbf{Throughput on a shared bench.} SIMD ratios are an order
+    of magnitude, not a controlled measurement; the LLC was large enough
+    that DRAM was not saturated.
+  \item \textbf{$\lambda$ constant is data-dependent.} The $4.2\times$
+    correction is measured on synthetic data; the production default
+    stays analytic for that reason.
+  \item \textbf{No ARM timing.} The NEON path is compile-checked by
+    cross-compilation only; SLHA's claims for ARM edge targets are
+    therefore architectural, not yet measured.
+  \item \textbf{Projection not jointly trained.} The task-aware result
+    optimizes $P$ alone, not end-to-end with a transformer.
+\end{itemize}
+
+\section{Future Work}
+\label{sec:future}
+Two of the hardware directions we had identified are now \emph{implemented}
+and described above: the cache-line-aware alignment (\S\ref{sec:cachemap})
+and the AVX-512 \textsc{vpopcntdq} residual reduction (\S\ref{sec:impl}).
+The remaining directions are framed as proposals (not measured here).
+
+\begin{enumerate}[leftmargin=1.6em,itemsep=2pt]
+  \item \textbf{Scalable SIMD on ARM (Jetson Thor class).} The coarse dot is
+    the hot term; an SVE2 path on Neoverse-V3AE could use \emph{scalable}
+    vectors (adapting to the implementation's vector length) beyond fixed
+    NEON. The residual popcount is already branchless and near-optimal at
+    256 bits, so the lever is the dot, not the popcount. We deliberately
+    keep this on the roadmap rather than in the shipped kernel for a
+    concrete toolchain reason: SVE2 intrinsics and portable
+    \texttt{std::simd} are nightly-gated, whereas the reference crate is
+    intentionally stable and dependency-free. The NEON\,+\,\texttt{cnt}
+    fallback remains correct meanwhile; SVE2 will land behind runtime
+    vector-length detection once the intrinsics stabilize --- and requires
+    ARM hardware to measure.
+  \item \textbf{Host-adaptive alignment via \texttt{build.rs}.} The
+    compile-time \texttt{cfg\_attr} alignment covers cross-compilation to a
+    \emph{known} target. For native builds (\texttt{-C target-cpu=native})
+    a build script could probe the host's \emph{actual} cache-line width and
+    emit a custom \texttt{cfg} (e.g.\ \texttt{cache\_line\_128}), refining
+    the ``AArch64 $\Rightarrow$ 128'' heuristic (not all AArch64 parts use
+    128-byte lines). This is a portability refinement, not a correctness
+    change.
+  \item \textbf{Salient-outlier tiles (BiLLM-style).} Following
+    BiLLM~\cite{billm}, isolating a few \emph{salient} dimensions in high
+    precision (a \texttt{salient\_mask} plus a small FP block) while
+    binarizing the rest could raise fidelity within the 128-byte budget. Two
+    non-obvious issues make this a design study rather than a drop-in change.
+    \emph{(i)~Metadata budget:} a 16-byte salient block must displace
+    existing metadata, and the natural victims---$\sigE$ and the MX
+    \texttt{group\_scales}---are exactly the fields that drive CCOS paging
+    (\S\ref{sec:ccos}) and microscaling, so the trade-off must be measured,
+    not assumed. \emph{(ii)~Expected benefit:} our ablation
+    (\S\ref{sec:ablation}) shows quantization is not the current bottleneck
+    on this benchmark; BiLLM targets quantization-error outliers, a regime
+    our synthetic generator does not yet model. The honest prerequisite is
+    therefore to extend the benchmark with realistic activation outliers, so
+    any salient-value gain can be \emph{demonstrated} before it is baked into
+    the tile.
+\end{enumerate}
+
+Beyond these: larger $\ds$ to lift the near-orthogonal resolution limit
+(\S\ref{sec:bincore}); \textbf{joint} training of $W_{\text{down}},
+W_{\text{up}}$ with a real model (\S\ref{sec:taskaware} establishes the
+principle); and real hardware validation (\texttt{perf} cache counters,
+end-to-end decode throughput, perplexity).
+
+\section{Conclusion}
+\label{sec:conclusion}
+SLHA~v2 marries a bit-exact, cache-aware data structure with a hybrid
+low-rank/1-bit attention score so that the KV cache becomes a fluid,
+architecture-aware structure rather than a monolithic burden. The
+mechanism is mathematically correct (test-proven, including
+scalar/AVX2/AVX-512 equivalence) and directionally validated:
+\textsc{hot} $\ge$ \textsc{warm} everywhere; Soft-Paging is near-lossless
+at low residual energy (output cosine $\approx 0.9995$ when half the
+working set is paged); SIMD reaches $\sim\!13\times$;
+SLHA scores $\sim\!2.5\times$ more tokens/s than bf16 at the kernel
+level; a learned projection beats PCA under $Q/K$ shift; and the
+attention output stays at cosine $0.95$--$0.997$ versus full precision. A
+controlled ablation reframes the problem: the coarse-score ceiling is set
+by the low-rank projection, not by latent quantization. What remains is
+real-hardware and real-model validation. We release the reference
+implementation, benchmarks, and tests to make every claim reproducible.
+
+\paragraph{Reproducibility.}
+The reference crate (\textsc{SciRust}), all benchmarks, and the 41 tests
+backing the numbers in \S\ref{sec:eval} are available in the project
+repository; every measurement uses fixed random seeds.
+
+\begin{thebibliography}{99}
+\setlength{\itemsep}{2pt}
+
+\bibitem{vaswani} A.~Vaswani, N.~Shazeer, N.~Parmar, J.~Uszkoreit,
+L.~Jones, A.~N.~Gomez, {\L}.~Kaiser, and I.~Polosukhin.
+\newblock Attention Is All You Need.
+\newblock In \emph{NeurIPS}, 2017.
+
+\bibitem{deepseekv2} DeepSeek-AI.
+\newblock DeepSeek-V2: A Strong, Economical, and Efficient
+Mixture-of-Experts Language Model.
+\newblock arXiv:2405.04434, 2024.
+
+\bibitem{vllm} W.~Kwon, Z.~Li, S.~Zhuang, Y.~Sheng, L.~Zheng,
+C.~H.~Yu, J.~E.~Gonzalez, H.~Zhang, and I.~Stoica.
+\newblock Efficient Memory Management for Large Language Model Serving
+with PagedAttention.
+\newblock In \emph{SOSP}, 2023.
+
+\bibitem{charikar} M.~S.~Charikar.
+\newblock Similarity Estimation Techniques from Rounding Algorithms.
+\newblock In \emph{STOC}, 2002.
+
+\bibitem{jl} W.~B.~Johnson and J.~Lindenstrauss.
+\newblock Extensions of Lipschitz Mappings into a Hilbert Space.
+\newblock \emph{Contemporary Mathematics}, 26:189--206, 1984.
+
+\bibitem{eckartyoung} C.~Eckart and G.~Young.
+\newblock The Approximation of One Matrix by Another of Lower Rank.
+\newblock \emph{Psychometrika}, 1(3):211--218, 1936.
+
+\bibitem{qlora} T.~Dettmers, A.~Pagnoni, A.~Holtzman, and L.~Zettlemoyer.
+\newblock QLoRA: Efficient Finetuning of Quantized LLMs.
+\newblock In \emph{NeurIPS}, 2023.
+
+\bibitem{gptq} E.~Frantar, S.~Ashkboos, T.~Hoefler, and D.~Alistarh.
+\newblock GPTQ: Accurate Post-Training Quantization for Generative
+Pre-trained Transformers.
+\newblock In \emph{ICLR}, 2023.
+
+\bibitem{awq} J.~Lin, J.~Tang, H.~Tang, S.~Yang, X.~Dang, and S.~Han.
+\newblock AWQ: Activation-aware Weight Quantization for LLM Compression
+and Acceleration.
+\newblock In \emph{MLSys}, 2024.
+
+\bibitem{billm} W.~Huang, Y.~Liu, H.~Qin, Y.~Li, S.~Zhang, X.~Liu,
+M.~Magno, and X.~Qi.
+\newblock BiLLM: Pushing the Limit of Post-Training Quantization for
+LLMs.
+\newblock In \emph{ICML}, 2024.
+
+\bibitem{kivi} Z.~Liu, J.~Yuan, H.~Jin, S.~Zhong, Z.~Xu, V.~Braverman,
+B.~Chen, and X.~Hu.
+\newblock KIVI: A Tuning-Free Asymmetric 2bit Quantization for KV Cache.
+\newblock In \emph{ICML}, 2024.
+
+\bibitem{h2o} Z.~Zhang, Y.~Sheng, T.~Zhou, T.~Chen, L.~Zheng, R.~Cai,
+Z.~Song, Y.~Tian, C.~R\'e, C.~Barrett, Z.~Wang, and B.~Chen.
+\newblock H2O: Heavy-Hitter Oracle for Efficient Generative Inference of
+Large Language Models.
+\newblock In \emph{NeurIPS}, 2023.
+
+\bibitem{streamingllm} G.~Xiao, Y.~Tian, B.~Chen, S.~Han, and M.~Lewis.
+\newblock Efficient Streaming Language Models with Attention Sinks.
+\newblock In \emph{ICLR}, 2024.
+
+\end{thebibliography}
+
+\end{document}
