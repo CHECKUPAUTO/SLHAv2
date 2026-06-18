@@ -63,16 +63,30 @@ pub enum LatentCodec {
 
 /// A single SLHA v2 context tile.
 ///
-/// `#[repr(C, align(64))]` and the field set are chosen so the type is
-/// **exactly 128 bytes with no padding** — a clean multiple of the 64-byte
-/// cache line (two lines). The 24 bytes that were *tail padding* in the v1
-/// layout (104 useful bytes rounded up to 128 by the alignment) are now spent
-/// on useful per-tile metadata instead of being wasted.
+/// The field set is chosen so the type is **exactly 128 bytes with no padding**.
+/// The alignment is **cache-line-aware** and resolved at compile time from the
+/// target architecture:
+///
+/// - `aarch64` (e.g. Jetson Thor / Neoverse, 128-byte cache line): `align(128)`
+///   → the tile occupies **exactly one** cache line (a single line fill on the
+///   LPDDR5X bus instead of two).
+/// - everything else (x86-64 etc., 64-byte cache line): `align(64)` → the tile
+///   spans **two** full cache lines.
+///
+/// The size is 128 bytes in **both** cases (128 is a multiple of both 64 and
+/// 128), so the zero-padding invariant holds regardless of target. No `build.rs`
+/// is needed: `target_arch` is a compile-time `cfg`. (A `build.rs` would only be
+/// warranted to probe the *host's actual* line size under `-C target-cpu=native`,
+/// which is neither portable nor cross-compilable — see the paper's roadmap.)
+///
+/// The 24 bytes that were *tail padding* in the v1 layout (104 useful bytes
+/// rounded up by the alignment) are now spent on useful per-tile metadata.
 ///
 /// Byte map (offsets): latent 0..64 | residual 64..96 | scale 96 | lambda 100 |
 /// residual_sigma 104 | token_id 108 | position 112 | head_id 116 |
 /// flags 118 | group_scales 120..128.
-#[repr(C, align(64))]
+#[cfg_attr(target_arch = "aarch64", repr(C, align(128)))]
+#[cfg_attr(not(target_arch = "aarch64"), repr(C, align(64)))]
 #[derive(Clone)]
 pub struct SciRustSlhaTile {
     /// Latent base `h_KV` (128 dims) quantised to signed INT4. 64 bytes.
@@ -180,10 +194,7 @@ impl SciRustSlhaTile {
     /// product of the two ±1 sign vectors.
     #[inline]
     fn residual_term(&self, q_sign: &[u64; RESIDUAL_WORDS]) -> f32 {
-        let mut hamming = 0u32;
-        for w in 0..RESIDUAL_WORDS {
-            hamming += (q_sign[w] ^ self.residual_bitmap[w]).count_ones();
-        }
+        let hamming = hamming_distance(q_sign, &self.residual_bitmap);
         self.dynamic_lambda * (D_S as f32 - 2.0 * hamming as f32)
     }
 
@@ -366,6 +377,57 @@ impl SciRustSlhaTile {
     }
 }
 
+/// Hamming distance over the 256-bit residual: `Σ popcount(aᵢ ⊕ bᵢ)`, the hot
+/// inner term of eq. (2.3) (`d_s − 2·Hamming` is the signed ±1 dot product).
+///
+/// **Branchless**: a fixed 4-word reduction with no data-dependent control flow
+/// (important for in-order issue / tight pipelines like ARM Neoverse). On
+/// x86-64 CPUs advertising AVX-512 `VPOPCNTDQ`+`VL` it folds the whole 256-bit
+/// residual into a single vector `vpopcntq`; otherwise it falls back to
+/// `u64::count_ones`, which already lowers to `POPCNT` (x86) / `CNT` (AArch64
+/// NEON). The one-time feature-detection branch is predicted and cached.
+#[inline]
+pub fn hamming_distance(a: &[u64; RESIDUAL_WORDS], b: &[u64; RESIDUAL_WORDS]) -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx512vpopcntdq") && is_x86_feature_detected!("avx512vl") {
+            // SAFETY: both required target features were just detected at runtime.
+            return unsafe { hamming_vpopcntdq(a, b) };
+        }
+    }
+    hamming_scalar(a, b)
+}
+
+/// Portable branchless reference: 4× `count_ones` (→ `POPCNT`/`CNT`).
+#[inline]
+fn hamming_scalar(a: &[u64; RESIDUAL_WORDS], b: &[u64; RESIDUAL_WORDS]) -> u32 {
+    let mut h = 0u32;
+    for w in 0..RESIDUAL_WORDS {
+        h += (a[w] ^ b[w]).count_ones();
+    }
+    h
+}
+
+/// AVX-512 VPOPCNTDQ path: XOR the two 256-bit residuals and popcount all four
+/// 64-bit lanes in a single `vpopcntq`, then reduce. Equivalent to
+/// [`hamming_scalar`] (asserted by `vpopcntdq_hamming_matches_scalar` on capable
+/// CPUs; compile-checked elsewhere).
+///
+/// # Safety
+/// Requires the `avx512vpopcntdq` and `avx512vl` target features; the only
+/// caller ([`hamming_distance`]) gates this behind `is_x86_feature_detected!`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512vpopcntdq,avx512vl")]
+unsafe fn hamming_vpopcntdq(a: &[u64; RESIDUAL_WORDS], b: &[u64; RESIDUAL_WORDS]) -> u32 {
+    use core::arch::x86_64::*;
+    let va = _mm256_loadu_si256(a.as_ptr() as *const __m256i);
+    let vb = _mm256_loadu_si256(b.as_ptr() as *const __m256i);
+    let pc = _mm256_popcnt_epi64(_mm256_xor_si256(va, vb)); // per-lane popcount
+    let mut lanes = [0u64; RESIDUAL_WORDS];
+    _mm256_storeu_si256(lanes.as_mut_ptr() as *mut __m256i, pc);
+    (lanes[0] + lanes[1] + lanes[2] + lanes[3]) as u32
+}
+
 /// Quantise a latent vector to signed INT4 with a symmetric per-tile scale.
 ///
 /// Returns the packed nibbles and the scale. `value ≈ (nibble - 8) * scale`,
@@ -487,9 +549,15 @@ mod tests {
 
     #[test]
     fn tile_is_exactly_128_bytes_zero_padding() {
-        // align(64) forces size to a multiple of 64; the field set is chosen
-        // so that multiple is exactly 128 with no wasted padding byte.
-        assert_eq!(align_of::<SciRustSlhaTile>(), 64);
+        // Cache-line-aware alignment: 128 on aarch64 (one 128-byte line), 64
+        // elsewhere (two 64-byte lines). Either way the size is exactly 128 with
+        // no wasted padding byte, since 128 is a multiple of both alignments.
+        let expected_align = if cfg!(target_arch = "aarch64") {
+            128
+        } else {
+            64
+        };
+        assert_eq!(align_of::<SciRustSlhaTile>(), expected_align);
         assert_eq!(size_of::<SciRustSlhaTile>(), 128);
 
         // Sum of field sizes == struct size  =>  no padding anywhere.
@@ -670,6 +738,63 @@ mod tests {
                 (s - a).abs() <= 1e-3 * (1.0 + s.abs()),
                 "tile {i}: scalar {s} vs neon {a}"
             );
+        }
+    }
+
+    /// The public `hamming_distance` dispatcher (whatever SIMD path the running
+    /// CPU selects) must equal a brute-force per-bit count, over random inputs.
+    #[test]
+    fn hamming_distance_matches_bruteforce() {
+        let mut rng = crate::rng::Rng::new(0x4D31);
+        for _ in 0..4000 {
+            let a = [
+                rng.next_u64(),
+                rng.next_u64(),
+                rng.next_u64(),
+                rng.next_u64(),
+            ];
+            let b = [
+                rng.next_u64(),
+                rng.next_u64(),
+                rng.next_u64(),
+                rng.next_u64(),
+            ];
+            let brute: u32 = (0..D_S)
+                .map(|s| (((a[s >> 6] >> (s & 63)) ^ (b[s >> 6] >> (s & 63))) & 1) as u32)
+                .sum();
+            assert_eq!(hamming_distance(&a, &b), brute);
+        }
+    }
+
+    /// On CPUs that advertise it, the AVX-512 VPOPCNTDQ path must be bit-exact
+    /// with the scalar reduction. Compile-checked on every x86-64 build; only
+    /// *executed* where the feature is present (skipped on this bench otherwise).
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn vpopcntdq_hamming_matches_scalar() {
+        if !(std::is_x86_feature_detected!("avx512vpopcntdq")
+            && std::is_x86_feature_detected!("avx512vl"))
+        {
+            eprintln!("avx512vpopcntdq+vl unavailable — skipping (compile-checked only)");
+            return;
+        }
+        let mut rng = crate::rng::Rng::new(0x5E42);
+        for _ in 0..4000 {
+            let a = [
+                rng.next_u64(),
+                rng.next_u64(),
+                rng.next_u64(),
+                rng.next_u64(),
+            ];
+            let b = [
+                rng.next_u64(),
+                rng.next_u64(),
+                rng.next_u64(),
+                rng.next_u64(),
+            ];
+            // SAFETY: features checked just above.
+            let simd = unsafe { hamming_vpopcntdq(&a, &b) };
+            assert_eq!(simd, hamming_scalar(&a, &b));
         }
     }
 }

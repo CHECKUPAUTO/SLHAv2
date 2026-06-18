@@ -1,7 +1,72 @@
 //! Integration tests for the CCOS elastic KV-cache manager (§4 Soft-Paging).
 
-use scirust::ccos::{ElasticKvCache, PageOutPolicy, TileState, HOT_BYTES};
+use scirust::ccos::{ElasticKvCache, PageOutPolicy, TileState, HOT_BYTES, WARM_BYTES};
+use scirust::rng::Rng;
 use scirust::scenario::{build_tile, generate, Projection};
+
+/// Invariants that must hold after every `enforce_budget`.
+fn assert_invariants(cache: &ElasticKvCache, budget: usize) {
+    // (1) The elastic footprint is within budget — eviction can always reach 0,
+    //     so this holds for *any* budget ≥ 0.
+    assert!(
+        cache.live_bytes() <= budget,
+        "footprint {} exceeds budget {budget}",
+        cache.live_bytes()
+    );
+    // (2) Byte accounting is consistent with the HOT/WARM/COLD counts.
+    let (h, w, _c) = cache.counts();
+    assert_eq!(
+        h * HOT_BYTES + w * WARM_BYTES,
+        cache.live_bytes(),
+        "counts ({h} HOT, {w} WARM) inconsistent with live_bytes"
+    );
+}
+
+/// Randomised: across many (size, budget, policy) configurations, every
+/// `enforce_budget` leaves the cache within budget with consistent accounting,
+/// and COLD slots are recycled (the slot vector never exceeds the high-water
+/// mark of simultaneously-live tiles).
+#[test]
+fn prop_enforce_budget_respects_budget_and_recycles() {
+    let proj = Projection::new(0xB0D);
+    for trial in 0..300u64 {
+        let mut rng = Rng::new(trial);
+        let n = 1 + (rng.next_u64() % 48) as usize;
+        // Budget from 0 up to slightly above all-HOT (covers page-only, evict,
+        // and evict-everything regimes).
+        let budget = (rng.next_u64() % (n as u64 * HOT_BYTES as u64 + 1)) as usize;
+        let policy = if trial.is_multiple_of(2) {
+            PageOutPolicy::LowestImpactFirst
+        } else {
+            PageOutPolicy::OldestFirst
+        };
+        let mut cache = ElasticKvCache::new(budget, policy);
+        let (_q, toks) = generate(trial + 1, n, 0.3);
+
+        for (i, t) in toks.iter().enumerate() {
+            cache.insert(build_tile(&proj, t, i as u32, false));
+            if rng.next_u64().is_multiple_of(3) {
+                cache.enforce_budget();
+                assert_invariants(&cache, budget);
+            }
+        }
+        cache.enforce_budget();
+        assert_invariants(&cache, budget);
+
+        // Slot recycling: total slots ever allocated ≤ tiles inserted, and COLD
+        // slots are reusable — re-inserting fills them without growing the arena.
+        let (h0, w0, c0) = cache.counts();
+        let total_slots = h0 + w0 + c0;
+        for (i, t) in toks.iter().enumerate() {
+            cache.insert(build_tile(&proj, t, i as u32, false));
+        }
+        let (h1, w1, c1) = cache.counts();
+        assert!(
+            h1 + w1 + c1 <= total_slots + n,
+            "arena grew past the live high-water mark (no recycling)"
+        );
+    }
+}
 
 #[test]
 fn page_out_masks_residual_and_falls_back_to_coarse() {

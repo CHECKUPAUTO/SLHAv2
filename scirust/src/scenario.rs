@@ -24,6 +24,32 @@ use crate::rng::Rng;
 /// Key dimensionality for the prototype (coarse key == latent space).
 pub const D_K: usize = D_C;
 
+/// Analytic λ constant from eq. (3.2): `√(π/(2·D_S))` (≈ 0.0783 at D_S = 256).
+/// A function rather than a `const` because `f32::sqrt` is not const-stable.
+#[inline]
+pub fn analytic_lambda_c() -> f32 {
+    (std::f32::consts::PI / (2.0 * D_S as f32)).sqrt()
+}
+
+/// Empirically-calibrated λ constant at D_S = 256. The calibration study
+/// (`examples/calibrate_lambda.rs`, `tests/calibration.rs`) shows the analytic
+/// constant under-weights the 1-bit residual by ~4.2× on the synthetic JL
+/// benchmark, so the least-squares-optimal constant is `C_emp ≈ 0.33`.
+///
+/// Exposed for opt-in use. [`build_tile`] keeps the **analytic** constant by
+/// default: the calibration minimises score *magnitude* error (RMSE), which is
+/// not the same objective as *ranking* (top-k / Spearman) — over-weighting the
+/// directionally-noisy residual can slightly hurt ranking — so the analytic
+/// value stays the conservative default and the §7 measurements remain valid.
+pub const LAMBDA_C_CALIBRATED: f32 = 0.33;
+
+/// λ for a tile from its residual energy `σ_E`, using the calibrated constant
+/// (see [`LAMBDA_C_CALIBRATED`]).
+#[inline]
+pub fn calibrated_lambda(sigma_e: f32) -> f32 {
+    sigma_e * LAMBDA_C_CALIBRATED
+}
+
 /// Fixed random sign-LSH projection `Z ∈ ℝ^{D_S × D_K}` (row-major).
 pub struct Projection {
     z: Vec<f32>,
@@ -70,8 +96,9 @@ pub fn build_tile(proj: &Projection, tok: &ContextToken, pos: u32, warm: bool) -
     let (latent, scale, group_scales) = quantize_latent_grouped(&tok.k_coarse);
     let bitmap = proj.sign_bits(&tok.e);
     let sigma_e = rms(&tok.e);
-    // eq. (3.2): λ = σ_E · sqrt(π / (2 · d_s)).
-    let lambda = sigma_e * (std::f32::consts::PI / (2.0 * D_S as f32)).sqrt();
+    // eq. (3.2): λ = σ_E · √(π / (2 · d_s)) — analytic constant (conservative
+    // default; see `LAMBDA_C_CALIBRATED` for the opt-in calibrated alternative).
+    let lambda = sigma_e * analytic_lambda_c();
     SciRustSlhaTile {
         latent_kv: latent,
         residual_bitmap: bitmap,
