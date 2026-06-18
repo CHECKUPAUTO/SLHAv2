@@ -98,7 +98,7 @@ L'innovation de la version v2 réside dans l'agencement mémoire en **Tuiles Sta
 
 ### 3.1 Alignement Géométrique des Tuiles
 
-Pour maximiser la localité spatiale et temporelle, nous définissons une structure `SciRustSlhaTile` alignée sur 64 octets (`#[repr(C, align(64))]`), dont l'empreinte mémoire est un multiple exact de la ligne de cache de 64 octets :
+Pour maximiser la localité spatiale et temporelle, nous définissons une structure `SciRustSlhaTile` alignée **par défaut sur 64 octets** (`align(64)`, portée à `align(128)` par `build.rs` sur un hôte natif à ligne de 128 o — cf. §3.1), dont l'empreinte mémoire est un multiple exact de la ligne de cache de 64 octets :
 
 | Élément de la Tuile SLHA v2 | Format / Spécification | Taille Mémoire | Cible Matérielle Principale |
 |---|---|---|---|
@@ -106,7 +106,7 @@ Pour maximiser la localité spatiale et temporelle, nous définissons une struct
 | Bitmaps de Résidus (d_s = 256) | 4 mots binaires de 64 bits (u64) | 32 Octets | Registres Vectoriels AVX-512 / ARM Neon |
 | Métadonnées (échelle, λ, σ_E, token, position, tête, flags, réserve) | 3×f32 + 2×u32 + 2×u16 + 8 o réservés | 32 Octets | Pagination CCOS & contrôle d'amplitude |
 
-**Invariant Matériel (implémenté & vérifié) :** Les trois blocs totalisent **exactement 128 octets** — latent 64 o + résidu 32 o + métadonnées 32 o. Avec `#[repr(C, align(64))]`, `size_of::<SciRustSlhaTile>()` vaut **128 octets sans aucun padding** (`align_of = 64`), soit **2 lignes de cache pleines**, alignées sur 64 o donc sans chevauchement d'une 3ᵉ ligne. C'est l'alignement correct pour **les deux cibles** : x86-64 **et** AArch64/Neoverse-V3AE — ce dernier **mesuré à 64 o** sur tous les niveaux (L1d/L1i/L2) d'un **Jetson Thor AGX 128** (le « 128 » désigne les 128 Go de **mémoire unifiée CPU/GPU** LPDDR5X, **pas** la ligne de cache). *Réserve corrigée :* on avait d'abord supposé une ligne de 128 o sur le Thor et appliqué `align(128)` sur `aarch64` ; la mesure de l'appareil l'a réfuté, donc on est revenu à `align(64)` (un `align(128)` ne servirait que sur les rares puces à ligne de 128 o, p. ex. Apple Silicon — via détection hôte en `build.rs`, cf. roadmap). Garanti par le test `tile_is_exactly_128_bytes_zero_padding` (somme des champs == `size_of` == 128, `align_of == 64`) et par la cross-compilation `aarch64-unknown-linux-gnu`. *Historique :* l'énoncé v1 « exactement 104 octets / multiple d'une ligne de cache » était faux — 104 n'est pas un multiple de 64, et l'`align(64)` arrondit la taille à 128. Les 24 octets qui n'étaient alors que du remplissage portent désormais des métadonnées utiles (σ_E, identifiants, drapeaux de pagination).
+**Invariant Matériel (implémenté & vérifié) :** Les trois blocs totalisent **exactement 128 octets** — latent 64 o + résidu 32 o + métadonnées 32 o. Avec `#[repr(C, align(64))]`, `size_of::<SciRustSlhaTile>()` vaut **128 octets sans aucun padding** (`align_of = 64`), soit **2 lignes de cache pleines**, alignées sur 64 o donc sans chevauchement d'une 3ᵉ ligne. C'est l'alignement correct pour **les deux cibles** : x86-64 **et** AArch64/Neoverse-V3AE — ce dernier **mesuré à 64 o** sur tous les niveaux (L1d/L1i/L2) d'un **Jetson Thor AGX 128** (le « 128 » désigne les 128 Go de **mémoire unifiée CPU/GPU** LPDDR5X, **pas** la ligne de cache). *Réserve corrigée :* on avait d'abord supposé une ligne de 128 o sur le Thor et appliqué `align(128)` sur `aarch64` ; la mesure de l'appareil l'a réfuté, donc on est revenu à `align(64)` **par défaut** (un `align(128)` ne sert que sur les rares puces à ligne de 128 o, p. ex. Apple Silicon : `build.rs` **détecte désormais** la ligne réelle de l'hôte sur une *build native* — `sysfs` Linux ou `sysctl` macOS — et n'active `align(128)` que là, via `cfg(cache_line_128)` ; jamais comme hypothèse « AArch64 ⇒ 128 ». En cross-compilation la ligne de l'hôte est sans rapport avec la cible, donc le défaut 64 o est conservé). Garanti par le test `tile_is_exactly_128_bytes_zero_padding` (somme des champs == `size_of` == 128 ; `align_of == 64` par défaut, 128 sur un hôte natif à ligne de 128 o) et par la cross-compilation `aarch64-unknown-linux-gnu`. *Historique :* l'énoncé v1 « exactement 104 octets / multiple d'une ligne de cache » était faux — 104 n'est pas un multiple de 64, et l'`align(64)` arrondit la taille à 128. Les 24 octets qui n'étaient alors que du remplissage portent désormais des métadonnées utiles (σ_E, identifiants, drapeaux de pagination).
 
 Par ailleurs, le **bloc latent INT4 occupe à lui seul exactement 64 octets**, soit **une** ligne de cache pleine pour 128 dimensions sémantiques : c'est ce sous-bloc — et non la tuile entière — qui sature l'unité arithmétique en un unique chargement de ligne. Lors d'un calcul d'attention, SciRust pré-charge les vecteurs de requêtes dans le cache L1, puis balaie les tuiles de contexte séquentiellement.
 
@@ -176,7 +176,10 @@ pub const RESIDUAL_WORDS: usize = D_S / 64; // 4
 pub const FLAG_HOT: u16 = 0;
 pub const FLAG_WARM: u16 = 1 << 0;          // résidu paginé : score = base latente seule
 
-#[repr(C, align(64))] // 128 octets exacts, zéro padding (test à l'appui)
+// 128 octets exacts, zéro padding (test à l'appui). align(64) par défaut ;
+// align(128) seulement sur un hôte natif à ligne de 128 o (build.rs → cfg).
+#[cfg_attr(cache_line_128, repr(C, align(128)))]
+#[cfg_attr(not(cache_line_128), repr(C, align(64)))]
 #[derive(Clone)]
 pub struct SciRustSlhaTile {
     pub latent_kv: [u8; LATENT_BYTES],          // 64  base h_KV en INT4 signé

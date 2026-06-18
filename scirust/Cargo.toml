@@ -12,8 +12,10 @@ name = "scirust"
 path = "src/lib.rs"
 
 # The library itself has ZERO external dependencies (it builds offline and adds
-# nothing to a consumer's tree). The only dev-dependency is a *lean* criterion
-# (no plotters/rayon/html) used solely by `cargo bench`.
+# nothing to a consumer's tree). It ships a tiny, std-only `build.rs` that probes
+# the native host's cache-line size to choose the tile alignment — it pulls in no
+# crates and is a no-op under cross-compilation. The only dev-dependency is a
+# *lean* criterion (no plotters/rayon/html) used solely by `cargo bench`.
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 

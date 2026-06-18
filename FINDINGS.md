@@ -46,7 +46,10 @@ mesures ont **réellement** établi. Toutes les valeurs sont reproductibles
   Thor AGX 128** (Neoverse-V3AE) : NEON **~×5,7** vs scalaire. Au passage il a
   **corrigé une fausse hypothèse** : le Thor a des lignes de cache de **64 o**
   (pas 128 — le « 128 » = 128 Go de mémoire unifiée CPU/GPU), d'où le retour à
-  `align(64)` ; et **`sve2` est présent** (cible de la roadmap §8).
+  `align(64)` **par défaut** (`build.rs` sonde désormais l'hôte et ne passe à
+  `align(128)` que sur une vraie ligne de 128 o, p. ex. Apple Silicon — jamais
+  comme hypothèse AArch64-wide) ; et **`sve2` est présent** (cible de la
+  roadmap §8).
 
 ## 2. Les leviers réels (et les faux leviers)
 

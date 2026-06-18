@@ -43,7 +43,10 @@ pub const NF4_CODEBOOK: [f32; 16];     // 16 quantiles N(0,1) normalisés à [-1
 ## `SciRustSlhaTile` — **128 octets, align 64, zéro padding**
 
 ```rust
-#[repr(C, align(64))]
+// align(64) par défaut ; align(128) sur un hôte natif à ligne de 128 o
+// (build.rs émet cfg(cache_line_128)). Taille = 128 o dans les deux cas.
+#[cfg_attr(cache_line_128, repr(C, align(128)))]
+#[cfg_attr(not(cache_line_128), repr(C, align(64)))]
 pub struct SciRustSlhaTile {
     pub latent_kv: [u8; 64],          // 64  base h_KV : 128 dims en INT4/NF4 (2/octet)
     pub residual_bitmap: [u64; 4],    // 32  résidu sign-LSH (256 bits)
@@ -59,7 +62,8 @@ pub struct SciRustSlhaTile {
 ```
 
 Le test `tile_is_exactly_128_bytes_zero_padding` vérifie `size_of == 128`,
-`align_of == 64`, et l'absence de padding.
+`align_of == 64` par défaut (128 sur un hôte natif à ligne de 128 o), et
+l'absence de padding.
 
 ### Méthodes
 

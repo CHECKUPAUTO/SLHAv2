@@ -6,6 +6,18 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
 ## [Unreleased]
 
 ### Added
+- **Alignement adaptatif à l'hôte via `build.rs`** (`SciRustSlhaTile`, §3.1) :
+  script de build sans dépendance qui sonde la **taille de ligne L1d réelle de
+  l'hôte** sur une *build native* (triplet hôte == cible ; `sysfs` Linux ou
+  `sysctl` macOS) et émet `cfg(cache_line_128)` pour porter la tuile à
+  `align(128)` **uniquement** sur une puce à ligne de 128 o (p. ex. Apple
+  Silicon). En cross-compilation, la ligne de l'hôte n'a pas de rapport avec la
+  cible : le défaut sûr `align(64)` est conservé. Raffinement de portabilité,
+  pas de correctness — la tuile reste **128 o sans padding** dans les deux cas,
+  et sur **toutes nos cibles** (x86-64, Thor) le résultat est inchangé
+  (`align(64)`). Remplace l'hypothèse « AArch64 ⇒ 128 » retirée ; test
+  `tile_is_exactly_128_bytes_zero_padding` rendu cfg-aware. `build.rs` émet
+  aussi `rustc-check-cfg` (zéro warning `unexpected_cfgs`).
 - **Kit de mesure multi-plateforme** (`examples/platform_report.rs` +
   `scripts/bench_device.sh`) : binaire portable (x86-64 **et** AArch64) qui
   détecte les features SIMD (AVX2/AVX-512/VPOPCNTDQ ou NEON/dotprod/SVE/SVE2),
@@ -24,7 +36,8 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
   128 Go de **mémoire unifiée CPU/GPU** LPDDR5X, pas la ligne de cache).
   `align(64)` est correct et optimal sur les deux cibles
   (tuile = 2 lignes de 64 o). Un `align(128)` ne sert que sur les puces à ligne
-  de 128 o (p. ex. Apple Silicon) → détection hôte en `build.rs` (roadmap).
+  de 128 o (p. ex. Apple Silicon) → détection hôte en `build.rs` (**désormais
+  implémenté**, cf. *Added* ci-dessus).
 - **Popcount résidu vectorisé AVX-512 VPOPCNTDQ** (`hamming_distance`, eq. 2.3) :
   chemin x86-64 *branchless* qui plie les 256 bits du résidu en un seul `vpopcntq`
   (`_mm256_popcnt_epi64`), sélectionné à l'exécution (`avx512vpopcntdq`+`vl`) avec
