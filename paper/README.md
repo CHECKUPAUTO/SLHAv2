@@ -10,9 +10,11 @@ The paper documents the **measured** state of the reference implementation
 (`scirust/`): the mechanism, the 128-byte cache-aware tile, CCOS Soft-Paging,
 and the full §7 evaluation (throughput, output fidelity, λ calibration, the
 quantization-is-not-the-bottleneck ablation). Every number is taken verbatim
-from the repository's reproducible (seeded) benchmarks, and the limitations are
-stated explicitly (synthetic data, random projections, no real-model perplexity,
-no hardware cache counters, no ARM timing).
+from the repository's reproducible (seeded) benchmarks — including **measured
+throughput on a Jetson Thor AGX 128** (AArch64/Neoverse-V3AE) alongside the x86
+baseline — and the limitations are stated explicitly (synthetic data, random
+projections, no real-model perplexity, no hardware cache counters, a single ARM
+device).
 
 ## Build
 

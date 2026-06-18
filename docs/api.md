@@ -119,13 +119,25 @@ scalaire portable. (Les anciennes features `avx2/popcnt/neon = []` étaient des
 no-op trompeuses — supprimées.) La bibliothèque est **sans dépendance** ;
 `criterion` n'est qu'une dev-dependency pour `cargo bench`.
 
-## Performance (mesurée, x86_64 Xeon, banc partagé)
+## Performance (mesurée, banc partagé)
+
+**x86-64 (Xeon) — baseline serveur :**
 
 | Chemin | Débit (1024 tuiles) | Rapport |
 |---|---|---|
 | Scalaire | ~3,0 M scores/s | 1× |
 | AVX2 | ~34–38 M scores/s | ~×11,5 |
 | AVX-512 | ~40–42 M scores/s | ~×14,1 |
+
+**AArch64 (Jetson Thor AGX 128, Neoverse-V3AE) — mesuré sur l'appareil :**
+
+| Chemin | Débit | Rapport |
+|---|---|---|
+| Scalaire | ~3,0 M scores/s | 1× |
+| NEON | ~17,1 M scores/s | **~×5,7** |
+
+(Lignes de cache à 64 o à tous les niveaux ; `sve2` présent. Reproductible via
+`cargo run --release -p scirust --example platform_report`.)
 
 - **Mémoire :** tuile 128 o/token contre 256 o pour une clé bf16 → **~2,5×**
   plus de tokens/s à débit comparable (§7.5).
@@ -168,8 +180,13 @@ Voir aussi `scirust/examples/basic_usage.rs` (exemple exécutable identique).
 cargo test                 # 41 tests (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS)
 cargo bench                # micro-benchs criterion (scalaire / AVX2 / AVX-512)
 cargo run -p scirust --example basic_usage
+cargo run --release -p scirust --example platform_report   # kit x86/ARM : features SIMD, cache, débit
 cargo build --workspace --all-targets   # compile lib + tests + benches + exemples
 ```
+
+Sur un appareil ARM (p. ex. Jetson Thor), `platform_report` (ou
+`scripts/bench_device.sh`) produit les chiffres NEON réels — voir la section
+Performance ci-dessus.
 
 ---
 *SLHA v2 — référence d'API alignée sur le code (`scirust` v0.2.0).*

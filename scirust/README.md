@@ -29,6 +29,8 @@ cargo run --example learn_projection --release    # projection apprise (task-awa
 cargo run --example calibrate_lambda --release    # calibration de λ (ΔP) vs référence FP
 cargo run --example cycles --release              # cycles/tuile (rdtsc) : scalaire/AVX2/AVX-512
 cargo run --example ccos_softpaging --release     # cache KV élastique : Soft-Paging HOT/WARM/COLD sous budget
+cargo run --example platform_report --release     # kit multi-plateforme : features SIMD, cache, débit (x86 & ARM)
+./scripts/bench_device.sh                          # lance le kit + exemples §7 sur l'appareil → results_<arch>.txt
 ```
 
 **Bibliothèque sans dépendance** : la lib n'ajoute rien à l'arbre d'un
@@ -41,8 +43,9 @@ property/fuzz restent eux aussi sans dépendance.
 API sûre (pas de `read_volatile`), sémantique exacte, avec des **chemins SIMD
 AVX2, AVX-512 (x86_64) et NEON (aarch64)** dispatchés à l'exécution + repli
 scalaire portable, chacun avec un test d'équivalence ≡ scalaire (AVX2 ~×11,5,
-AVX-512 ~×14,1 vs scalaire). NEON **vérifié par cross-compilation** (non
-chronométré, pas d'ARM sur le banc).
+AVX-512 ~×14,1 vs scalaire). NEON **mesuré sur Jetson Thor AGX 128**
+(Neoverse-V3AE) : ~**×5,7** vs scalaire (via le kit `platform_report`). Un
+chemin popcount **AVX-512 VPOPCNTDQ** existe aussi (sélection à l'exécution).
 
 Le prototype de mesure utilise des projections **aléatoires** (non apprises) :
 il valide la machinerie *quantification INT4 + résidu 1-bit + ranking*, **pas**
@@ -54,7 +57,7 @@ faible énergie résiduelle, gains du résidu 1-bit modérés à `d_s = 256`.
 
 | Fichier | Rôle |
 |---|---|
-| `attention/slha_v2.rs` | Tuile `SciRustSlhaTile` (128 o), kernel `compute_score` (scalaire + AVX2 + AVX-512), codecs latents INT4 (MX) / NF4 |
+| `attention/slha_v2.rs` | Tuile `SciRustSlhaTile` (128 o), kernel `compute_score` (scalaire + AVX2 + AVX-512 + NEON ; popcount VPOPCNTDQ), codecs latents INT4 (MX) / NF4 |
 | `ccos.rs` | Cache KV élastique `ElasticKvCache` : Soft-Paging HOT/WARM/COLD, `page_out`/`evict`/`enforce_budget` (§4) |
 | `linalg.rs` | Décomposition propre symétrique (Jacobi) pour la PCA |
 | `learned.rs` | Projection bas-rang : PCA + **SGD task-aware** (`train_projection`) + génération de clés |
@@ -72,5 +75,7 @@ faible énergie résiduelle, gains du résidu 1-bit modérés à `d_s = 256`.
 | `../examples/calibrate_lambda.rs` | Calibration de λ (dérive ΔP) vs référence FP |
 | `../examples/cycles.rs` | Cycles/tuile (TSC via rdtsc) — complète le bench ns |
 | `../examples/ccos_softpaging.rs` | Démo CCOS : cache KV élastique sous budget, fidélité de la sortie |
+| `../examples/platform_report.rs` | Kit multi-plateforme (x86 & ARM) : features SIMD, niveaux de cache, alignement, débit |
+| `../scripts/bench_device.sh` | Lance le kit + les exemples §7 sur l'appareil → `results_<arch>.txt` |
 | `../tests/calibration.rs` | Test épinglant la calibration de λ (forme + constante) |
 | `../tests/ccos.rs` | Tests d'intégration du Soft-Paging (masquage résidu, budget, recyclage) |

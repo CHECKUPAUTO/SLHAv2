@@ -133,8 +133,8 @@ Voir le [guide d'intégration](docs/INTEGRATION.md) — **esquisse de conception
 ## État du projet
 
 - ✅ **Mécanisme validé** : **41 tests** (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS), clippy `-D warnings` clean, CI
-- ✅ **Performance** : **AVX2 ~×11,5 / AVX-512 ~×14,1** plus rapide que le scalaire
-- ✅ **Multi-plateforme** : x86_64 (AVX2/AVX-512) + ARM (NEON, cross-compilé)
+- ✅ **Performance** : x86 **AVX2 ~×11,5 / AVX-512 ~×14,1** ; ARM **NEON ~×5,7** (mesuré sur Jetson Thor AGX 128) — vs scalaire
+- ✅ **Multi-plateforme** : x86_64 (AVX2/AVX-512/VPOPCNTDQ) + ARM AArch64 (NEON, **mesuré sur Jetson Thor** ; `sve2` détecté) — kit `examples/platform_report`
 - ✅ **Fidélité** : cosinus 0,95–0,997 vs attention complète (sortie `softmax·V`)
 - ✅ **Soft-Paging** : cache KV élastique (`ccos::ElasticKvCache`) — pager la moitié des tuiles HOT→WARM laisse la sortie à **cos 0,9995** (`examples/ccos_softpaging`, §4)
 - ⏳ **Intégration LLM réel** + perplexité : à venir (hors banc actuel)
