@@ -319,18 +319,17 @@ the conservative default and document the calibrated constant
 
 \subsection{The 128-byte tile}
 SLHA~v2 stores each (key, residual, metadata) triple in a single
-\texttt{\#[repr(C)]} structure whose total size is exactly
-128~bytes \emph{with zero padding}. Its alignment is \emph{cache-line-aware}
-and resolved at compile time from the target architecture
-(\S\ref{sec:cachemap}). Table~\ref{tab:tile} gives the layout.
+\texttt{\#[repr(C, align(64))]} structure whose total size is exactly
+128~bytes \emph{with zero padding} --- two 64-byte cache lines, 64-aligned so
+it never straddles a third line (\S\ref{sec:cachemap}). Table~\ref{tab:tile}
+gives the layout.
 
 \begin{table}[t]
 \centering
 \caption{The \texttt{SciRustSlhaTile} layout ($\dc=128$, $\ds=256$).
-Total $= 64+32+32 = 128$ bytes; \texttt{align\_of} is $128$ on AArch64
-and $64$ elsewhere (size is $128$ either way); verified by
-test \texttt{tile\_is\_exactly\_128\_bytes\_zero\_padding} and by AArch64
-cross-compilation.}
+Total $= 64+32+32 = 128$ bytes; \texttt{align\_of}~$=64$ (two cache lines);
+verified by test \texttt{tile\_is\_exactly\_128\_bytes\_zero\_padding} and by
+AArch64 cross-compilation.}
 \label{tab:tile}
 \small
 \begin{tabular}{@{}llr l@{}}
@@ -360,9 +359,8 @@ $\texttt{scale}\cdot \texttt{group\_scales}[g]/255$.
 
 \begin{lstlisting}[caption={Core tile and fused score (abridged from
 \texttt{scirust/src/attention/slha\_v2.rs}).},captionpos=b]
-// Cache-line-aware alignment, resolved at compile time (size is 128 either way).
-#[cfg_attr(target_arch = "aarch64",      repr(C, align(128)))] // one 128B line
-#[cfg_attr(not(target_arch = "aarch64"), repr(C, align(64)))]  // two 64B lines
+// 128 bytes = two 64-byte cache lines (x86-64 and Neoverse both use 64B lines).
+#[repr(C, align(64))]
 pub struct SciRustSlhaTile {
     pub latent_kv: [u8; 64],         // INT4/NF4 latent (128 dims)
     pub residual_bitmap: [u64; 4],   // sign-LSH residual (256 bits)
@@ -392,20 +390,21 @@ feeds the arithmetic unit in a single line load. Queries are pre-loaded
 into L1 and the context tiles are swept sequentially, so the access
 pattern is a pure streaming read with unit stride.
 
-Because cache-line width differs across our targets---64~bytes on
-mainstream x86-64, 128~bytes on Jetson Thor-class AArch64
-(Neoverse-V3AE)---we resolve the alignment attribute at compile time from
-\texttt{target\_arch} via \texttt{cfg\_attr} (listing above):
-\texttt{align(128)} on AArch64, so a tile is \emph{exactly one} cache line
-and a single line fill on the LPDDR5X bus; \texttt{align(64)} elsewhere, so
-a tile spans two lines. The \emph{size} is 128~bytes in both cases
-(128 is a multiple of both alignments), so zero padding holds regardless of
-target. No \texttt{build.rs} is needed because \texttt{target\_arch} is a
-compile-time \texttt{cfg}; a build script would only help to probe the
-\emph{host's} actual line size under \texttt{-C target-cpu=native}
-(\S\ref{sec:future}). We cross-compile to
-\texttt{aarch64-unknown-linux-gnu} in CI so the AArch64 layout and NEON
-kernel are type-checked.
+Both of our target families use a \textbf{64-byte} cache line: x86-64, and
+AArch64/Neoverse-V3AE. We initially assumed a Jetson Thor-class part would
+use 128-byte lines (the ``128'' in \emph{AGX 128}), but measuring the device
+refuted this---all levels are 64~bytes (L1d/L1i/L2; see Table~\ref{tab:thor})
+---so the ``128'' denotes the 128~GB LPDDR5X unified memory, not the line.
+We therefore align the tile to \texttt{64}, which is correct and optimal on
+both families: a 64-aligned 128-byte tile occupies exactly two full lines and
+never straddles a third, and \texttt{align(64)} prevents false sharing without
+the dead space a larger alignment would imply. A part that genuinely uses
+128-byte lines (e.g.\ Apple Silicon) could raise this to \texttt{align(128)}
+for a single-line fill; because alignment must be a compile-time constant,
+detecting the \emph{host's} true line size belongs in a \texttt{build.rs}
+(\S\ref{sec:future}) rather than an \texttt{aarch64}-wide assumption. We
+cross-compile to \texttt{aarch64-unknown-linux-gnu} in CI so the AArch64
+layout and NEON kernel are type-checked.
 
 \section{CCOS Elastic KV-Cache and Soft-Paging}
 \label{sec:ccos}
@@ -776,15 +775,36 @@ path also paid a branchy INT4 dequant that SIMD fuses. AVX-512 adds only
 $\sim\!23\%$ over AVX2: the kernel is short (128 dims) and bound by
 nibble-unpacking/loads, not FMA width. In reference cycles
 (\texttt{rdtsc}): $\sim$942 cyc/tile scalar, $\sim$89 AVX2, $\sim$71
-AVX-512. A NEON path exists and is cross-compile-verified but not timed
-on this (x86-64) bench. SLHA v2 targets \emph{both} families---x86-64
-servers and AArch64 edge devices (e.g.\ Jetson Thor AGX 128,
-Neoverse-V3AE)---and the crate ships a portable \texttt{platform\_report}
-bench kit (and a runner script) that detects features (AVX/NEON/SVE2),
-confirms the cache-line-aware tile alignment, and measures
-wall-clock throughput on whatever CPU runs it. The x86-64 figures above are
-the server baseline; on-device AArch64 numbers are reproduced by running
-the kit on the target rather than fabricated here.
+AVX-512. The NEON path is now \emph{measured} on a Jetson Thor AGX 128
+(AArch64, Neoverse-V3AE) with the bench kit (Table~\ref{tab:thor}): NEON
+sustains $17.1$ M scores/s vs.\ $3.0$ scalar, a $5.7\times$ device-level
+speedup. SLHA v2 thus targets \emph{both} families---x86-64 servers and
+AArch64 edge devices---and the crate ships a portable
+\texttt{platform\_report} kit (and runner script) that detects features
+(AVX/NEON/SVE2), reports the cache hierarchy, checks the tile size/alignment
+against the device's line, and times throughput on whatever CPU runs it. The
+x86-64 figures are the server baseline; the AArch64 figures are measured
+on-device, not fabricated.
+
+\begin{table}[t]
+\centering
+\caption{On-device measurement on a Jetson Thor AGX 128 (AArch64,
+Neoverse-V3AE), via the \texttt{platform\_report} kit. All cache levels use
+64-byte lines; \texttt{sve2} is present (cf.\ \S\ref{sec:future}).}
+\label{tab:thor}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+Property & Value \\
+\midrule
+Cache lines (L1d / L1i / L2) & 64 B / 64 B / 64 B \\
+SIMD features                & neon, dotprod, i8mm, fp16, sve, \textbf{sve2} \\
+Tile size / align            & 128 B / 64 B (two 64-byte lines) \\
+Dispatched kernel            & NEON \\
+Throughput (NEON / scalar)   & $17.1$ / $3.0$ M scores/s ($\mathbf{5.7\times}$) \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \subsection{Memory traffic vs.\ a bf16 baseline}
 \label{sec:membw}
@@ -866,25 +886,30 @@ We are explicit about the boundaries of these results.
   \item \textbf{$\lambda$ constant is data-dependent.} The $4.2\times$
     correction is measured on synthetic data; the production default
     stays analytic for that reason.
-  \item \textbf{No ARM timing.} The NEON path is compile-checked by
-    cross-compilation only; SLHA's claims for ARM edge targets are
-    therefore architectural, not yet measured.
+  \item \textbf{Single ARM device.} ARM throughput is now measured, but on
+    \emph{one} part (Jetson Thor AGX 128, Neoverse-V3AE; Table~\ref{tab:thor});
+    other AArch64 microarchitectures may differ, and the same
+    hardware-counter caveat applies.
   \item \textbf{Projection not jointly trained.} The task-aware result
     optimizes $P$ alone, not end-to-end with a transformer.
 \end{itemize}
 
 \section{Future Work}
 \label{sec:future}
-Two of the hardware directions we had identified are now \emph{implemented}
-and described above: the cache-line-aware alignment (\S\ref{sec:cachemap})
-and the AVX-512 \textsc{vpopcntdq} residual reduction (\S\ref{sec:impl}).
-The remaining directions are framed as proposals (not measured here).
+One hardware direction we identified is now \emph{implemented} and described
+above: the AVX-512 \textsc{vpopcntdq} residual reduction (\S\ref{sec:impl}).
+A second---architecture-conditional 128-byte alignment---was implemented and
+then \emph{withdrawn} once the device measurement (Table~\ref{tab:thor})
+showed the Jetson Thor uses 64-byte lines, not 128; it survives as the
+build-script item below. The remaining directions are proposals (not measured
+here).
 
 \begin{enumerate}[leftmargin=1.6em,itemsep=2pt]
   \item \textbf{Scalable SIMD on ARM (Jetson Thor class).} The coarse dot is
-    the hot term; an SVE2 path on Neoverse-V3AE could use \emph{scalable}
-    vectors (adapting to the implementation's vector length) beyond fixed
-    NEON. The residual popcount is already branchless and near-optimal at
+    the hot term; an SVE2 path on Neoverse-V3AE---\texttt{sve2} is confirmed
+    present on the measured device (Table~\ref{tab:thor})---could use
+    \emph{scalable} vectors (adapting to the implementation's vector length)
+    beyond fixed NEON. The residual popcount is already branchless and near-optimal at
     256 bits, so the lever is the dot, not the popcount. We deliberately
     keep this on the roadmap rather than in the shipped kernel for a
     concrete toolchain reason: SVE2 intrinsics and portable
@@ -893,14 +918,16 @@ The remaining directions are framed as proposals (not measured here).
     fallback remains correct meanwhile; SVE2 will land behind runtime
     vector-length detection once the intrinsics stabilize --- and requires
     ARM hardware to measure.
-  \item \textbf{Host-adaptive alignment via \texttt{build.rs}.} The
-    compile-time \texttt{cfg\_attr} alignment covers cross-compilation to a
-    \emph{known} target. For native builds (\texttt{-C target-cpu=native})
-    a build script could probe the host's \emph{actual} cache-line width and
-    emit a custom \texttt{cfg} (e.g.\ \texttt{cache\_line\_128}), refining
-    the ``AArch64 $\Rightarrow$ 128'' heuristic (not all AArch64 parts use
-    128-byte lines). This is a portability refinement, not a correctness
-    change.
+  \item \textbf{Host-adaptive alignment via \texttt{build.rs}.} The tile is
+    \texttt{align(64)}, correct for every 64-byte-line part (all our targets,
+    including the Thor). The only case that benefits from \texttt{align(128)}
+    is a part with genuine 128-byte lines (e.g.\ Apple Silicon). Since
+    alignment is a compile-time constant, a build script could probe the
+    host's \emph{actual} line size under \texttt{-C target-cpu=native} and emit
+    a \texttt{cfg} (e.g.\ \texttt{cache\_line\_128}) to raise the alignment
+    only where it helps---rather than the \emph{wrong} ``AArch64 $\Rightarrow$
+    128'' assumption we measured and discarded. A portability refinement, not
+    a correctness change.
   \item \textbf{Salient-outlier tiles (BiLLM-style).} Following
     BiLLM~\cite{billm}, isolating a few \emph{salient} dimensions in high
     precision (a \texttt{salient\_mask} plus a small FP block) while
