@@ -30,6 +30,7 @@ cargo run --example calibrate_lambda --release    # calibration de λ (ΔP) vs r
 cargo run --example cycles --release              # cycles/tuile (rdtsc) : scalaire/AVX2/AVX-512
 cargo run --example ccos_softpaging --release     # cache KV élastique : Soft-Paging HOT/WARM/COLD sous budget
 cargo run --example platform_report --release     # kit multi-plateforme : features SIMD, cache, débit (x86 & ARM)
+cargo run --example salient_outliers --release    # étude BiLLM : canaux outliers + préservation FP saillante
 ./scripts/bench_device.sh                          # lance le kit + exemples §7 sur l'appareil → results_<arch>.txt
 ```
 
@@ -76,6 +77,7 @@ faible énergie résiduelle, gains du résidu 1-bit modérés à `d_s = 256`.
 | `../examples/cycles.rs` | Cycles/tuile (TSC via rdtsc) — complète le bench ns |
 | `../examples/ccos_softpaging.rs` | Démo CCOS : cache KV élastique sous budget, fidélité de la sortie |
 | `../examples/platform_report.rs` | Kit multi-plateforme (x86 & ARM) : features SIMD, niveaux de cache, alignement, débit |
+| `../examples/salient_outliers.rs` | Étude BiLLM : injecte des canaux outliers, mesure INT4 vs préservation FP saillante |
 | `../scripts/bench_device.sh` | Lance le kit + les exemples §7 sur l'appareil → `results_<arch>.txt` |
 | `../tests/calibration.rs` | Test épinglant la calibration de λ (forme + constante) |
 | `../tests/ccos.rs` | Tests d'intégration du Soft-Paging (masquage résidu, budget, recyclage) |
