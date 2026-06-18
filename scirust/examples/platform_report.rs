@@ -9,8 +9,9 @@
 //!     i8mm/SVE/SVE2 on AArch64),
 //!   * the OS-reported cache-line size at every cache level,
 //!   * the tile `size_of`/`align_of` and how many cache lines it spans
-//!     (`align(64)`; x86-64 and Neoverse both use 64-byte lines, so the 128-byte
-//!     tile is two lines),
+//!     (`align(64)` by default — x86-64 and Neoverse both use 64-byte lines, so
+//!     the 128-byte tile is two lines; `build.rs` raises it to `align(128)` only
+//!     on a native 128-byte-line host),
 //!   * which kernel path the runtime dispatcher selects, and
 //!   * a wall-clock throughput micro-bench (scalar vs the dispatched SIMD path).
 //!
