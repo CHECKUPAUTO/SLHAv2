@@ -9,18 +9,21 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
 - **Kit de mesure multi-plateforme** (`examples/platform_report.rs` +
   `scripts/bench_device.sh`) : binaire portable (x86-64 **et** AArch64) qui
   détecte les features SIMD (AVX2/AVX-512/VPOPCNTDQ ou NEON/dotprod/SVE/SVE2),
-  lit la taille de ligne de cache, confirme l'alignement de tuile adaptatif
-  (`align(128)` sur AArch64), affiche le chemin kernel dispatché, et mesure le
-  débit (scalaire vs SIMD) en temps mur. Sert à produire des chiffres réels
-  **sur l'appareil cible** (p. ex. Jetson Thor AGX 128) sans rien fabriquer ;
-  x86 reste la baseline serveur.
-- **Alignement adaptatif à la ligne de cache** (`SciRustSlhaTile`, §3.1) : l'attribut
-  d'alignement est résolu à la compilation depuis `target_arch` via `cfg_attr` —
-  `align(128)` sur `aarch64` (Jetson Thor / Neoverse : la tuile tient sur **une
-  seule** ligne de cache de 128 o), `align(64)` ailleurs (x86-64 : deux lignes).
-  Taille **128 o sans padding** dans les deux cas. Vérifié par cross-compilation
-  `aarch64-unknown-linux-gnu` ; pas de `build.rs` requis (`target_arch` est un
-  `cfg`).
+  **liste tous les niveaux de cache et leur taille de ligne**, vérifie la
+  taille/alignement de tuile vs la ligne, affiche le chemin kernel dispatché,
+  et mesure le débit (scalaire vs SIMD) en temps mur. A servi à produire les
+  **chiffres ARM réels** sur **Jetson Thor AGX 128** (NEON 17,1 M/s vs 3,0
+  scalaire = 5,7× ; toutes lignes de cache à 64 o ; `sve2` présent) ; x86 reste
+  la baseline serveur.
+
+### Changed / Corrected
+- **Alignement de tuile ramené à `align(64)` universel** (`SciRustSlhaTile`,
+  §3.1). On avait introduit un `align(128)` conditionnel sur `aarch64` en
+  supposant une ligne de cache de 128 o sur le Jetson Thor ; **la mesure de
+  l'appareil l'a réfuté** (L1d/L1i/L2 = 64 o — le « 128 » d'*AGX 128* = les
+  128 Go LPDDR5X). `align(64)` est correct et optimal sur les deux cibles
+  (tuile = 2 lignes de 64 o). Un `align(128)` ne sert que sur les puces à ligne
+  de 128 o (p. ex. Apple Silicon) → détection hôte en `build.rs` (roadmap).
 - **Popcount résidu vectorisé AVX-512 VPOPCNTDQ** (`hamming_distance`, eq. 2.3) :
   chemin x86-64 *branchless* qui plie les 256 bits du résidu en un seul `vpopcntq`
   (`_mm256_popcnt_epi64`), sélectionné à l'exécution (`avx512vpopcntdq`+`vl`) avec

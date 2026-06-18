@@ -63,21 +63,15 @@ pub enum LatentCodec {
 
 /// A single SLHA v2 context tile.
 ///
-/// The field set is chosen so the type is **exactly 128 bytes with no padding**.
-/// The alignment is **cache-line-aware** and resolved at compile time from the
-/// target architecture:
-///
-/// - `aarch64` (e.g. Jetson Thor / Neoverse, 128-byte cache line): `align(128)`
-///   → the tile occupies **exactly one** cache line (a single line fill on the
-///   LPDDR5X bus instead of two).
-/// - everything else (x86-64 etc., 64-byte cache line): `align(64)` → the tile
-///   spans **two** full cache lines.
-///
-/// The size is 128 bytes in **both** cases (128 is a multiple of both 64 and
-/// 128), so the zero-padding invariant holds regardless of target. No `build.rs`
-/// is needed: `target_arch` is a compile-time `cfg`. (A `build.rs` would only be
-/// warranted to probe the *host's actual* line size under `-C target-cpu=native`,
-/// which is neither portable nor cross-compilable — see the paper's roadmap.)
+/// `#[repr(C, align(64))]` and the field set are chosen so the type is **exactly
+/// 128 bytes with no padding** — two 64-byte cache lines, 64-aligned so it never
+/// straddles a third line. This matches the 64-byte cache line of **both** target
+/// families: x86-64, and AArch64/Neoverse-V3AE (measured at 64 B across L1d/L1i/L2
+/// on a Jetson Thor AGX 128 — the "128" there is the 128 GB LPDDR5X memory, not
+/// the cache line). Parts that genuinely use 128-byte lines (e.g. Apple Silicon)
+/// could use `align(128)` to occupy a single line; detecting the host's true line
+/// size is a `build.rs` roadmap item (see the paper), not an `aarch64`-wide
+/// assumption.
 ///
 /// The 24 bytes that were *tail padding* in the v1 layout (104 useful bytes
 /// rounded up by the alignment) are now spent on useful per-tile metadata.
@@ -85,8 +79,7 @@ pub enum LatentCodec {
 /// Byte map (offsets): latent 0..64 | residual 64..96 | scale 96 | lambda 100 |
 /// residual_sigma 104 | token_id 108 | position 112 | head_id 116 |
 /// flags 118 | group_scales 120..128.
-#[cfg_attr(target_arch = "aarch64", repr(C, align(128)))]
-#[cfg_attr(not(target_arch = "aarch64"), repr(C, align(64)))]
+#[repr(C, align(64))]
 #[derive(Clone)]
 pub struct SciRustSlhaTile {
     /// Latent base `h_KV` (128 dims) quantised to signed INT4. 64 bytes.
@@ -549,15 +542,10 @@ mod tests {
 
     #[test]
     fn tile_is_exactly_128_bytes_zero_padding() {
-        // Cache-line-aware alignment: 128 on aarch64 (one 128-byte line), 64
-        // elsewhere (two 64-byte lines). Either way the size is exactly 128 with
-        // no wasted padding byte, since 128 is a multiple of both alignments.
-        let expected_align = if cfg!(target_arch = "aarch64") {
-            128
-        } else {
-            64
-        };
-        assert_eq!(align_of::<SciRustSlhaTile>(), expected_align);
+        // align(64) matches the 64-byte cache line of both target families
+        // (x86-64 and AArch64/Neoverse — the latter measured at 64 B on a Jetson
+        // Thor AGX 128). The 128-byte tile is exactly two cache lines, no padding.
+        assert_eq!(align_of::<SciRustSlhaTile>(), 64);
         assert_eq!(size_of::<SciRustSlhaTile>(), 128);
 
         // Sum of field sizes == struct size  =>  no padding anywhere.

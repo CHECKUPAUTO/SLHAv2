@@ -7,9 +7,10 @@
 //! comparable, on-device numbers. It prints:
 //!   * the detected SIMD features (AVX2/AVX-512/VPOPCNTDQ on x86; NEON/dotprod/
 //!     i8mm/SVE/SVE2 on AArch64),
-//!   * the OS-reported cache-line size,
-//!   * the tile `size_of`/`align_of` (confirming the cache-line-aware
-//!     `align(128)` on AArch64 — one line — vs `align(64)` on x86 — two lines),
+//!   * the OS-reported cache-line size at every cache level,
+//!   * the tile `size_of`/`align_of` and how many cache lines it spans
+//!     (`align(64)`; x86-64 and Neoverse both use 64-byte lines, so the 128-byte
+//!     tile is two lines),
 //!   * which kernel path the runtime dispatcher selects, and
 //!   * a wall-clock throughput micro-bench (scalar vs the dispatched SIMD path).
 //!
@@ -22,11 +23,36 @@ use std::hint::black_box;
 use std::mem::{align_of, size_of};
 use std::time::{Duration, Instant};
 
-/// OS-reported coherency cache-line size (bytes), via Linux sysfs.
-fn cache_line_bytes() -> Option<usize> {
-    std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size")
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
+/// All CPU0 cache levels: `(level, type, line_bytes, size_str)`, via Linux sysfs.
+fn cache_levels() -> Vec<(String, String, usize, String)> {
+    let mut out = Vec::new();
+    for i in 0..16 {
+        let dir = format!("/sys/devices/system/cpu/cpu0/cache/index{i}");
+        let Ok(level) = std::fs::read_to_string(format!("{dir}/level")) else {
+            break;
+        };
+        let typ = std::fs::read_to_string(format!("{dir}/type")).unwrap_or_default();
+        let line = std::fs::read_to_string(format!("{dir}/coherency_line_size"))
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+        let size = std::fs::read_to_string(format!("{dir}/size")).unwrap_or_default();
+        out.push((
+            level.trim().into(),
+            typ.trim().into(),
+            line,
+            size.trim().into(),
+        ));
+    }
+    out
+}
+
+/// L1 data cache line size (bytes), if reported — used for the tile/line ratio.
+fn l1d_line() -> Option<usize> {
+    cache_levels()
+        .into_iter()
+        .find(|(lvl, typ, line, _)| lvl == "1" && typ == "Data" && *line > 0)
+        .map(|(_, _, line, _)| line)
 }
 
 /// Runtime-detected SIMD features relevant to the kernel, per architecture.
@@ -120,9 +146,14 @@ fn main() {
 
     println!("== SLHA v2 — platform & throughput report ==");
     println!("  target_arch     : {arch}  ({}-bit pointers)", usize::BITS);
-    match cache_line_bytes() {
-        Some(c) => println!("  cache line      : {c} bytes (OS-reported)"),
-        None => println!("  cache line      : unknown (sysfs unavailable)"),
+    let levels = cache_levels();
+    if levels.is_empty() {
+        println!("  cache levels    : unknown (sysfs unavailable)");
+    } else {
+        println!("  cache levels    :");
+        for (lvl, typ, line, size) in &levels {
+            println!("      L{lvl} {typ:<11} line={line} B  size={size}");
+        }
     }
     print!("  SIMD features   :");
     for (name, on) in features() {
@@ -132,11 +163,10 @@ fn main() {
 
     let (sz, al) = (size_of::<SciRustSlhaTile>(), align_of::<SciRustSlhaTile>());
     println!("  tile            : size_of={sz} B, align_of={al} B");
-    if let Some(c) = cache_line_bytes() {
+    if let Some(c) = l1d_line() {
         println!(
-            "  tile vs line    : spans {} cache line(s) of {c} B (alignment {} the line)",
-            sz.div_ceil(c),
-            if al >= c { "matches" } else { "is below" }
+            "  tile vs L1 line : {sz} B tile = {} line(s) of {c} B (align {al} B)",
+            sz.div_ceil(c)
         );
     }
     println!("  kernel dispatch : {}\n", dispatched_path());
