@@ -49,7 +49,11 @@ mesures ont **réellement** établi. Toutes les valeurs sont reproductibles
   `align(64)` **par défaut** (`build.rs` sonde désormais l'hôte et ne passe à
   `align(128)` que sur une vraie ligne de 128 o, p. ex. Apple Silicon — jamais
   comme hypothèse AArch64-wide) ; et **`sve2` est présent** (cible de la
-  roadmap §8).
+  roadmap §8). *Statut SVE2 vérifié* (`rustc 1.94.1`) : détection runtime
+  **stable**, mais intrinsèques SVE2 (`svdot_s32`…) **nightly-only** (absentes
+  du `core::arch::aarch64` stable, comme `std::simd`) ; la seule voie stable
+  (`asm!` manuel) est **invérifiable sans appareil SVE2** (CI x86) ⇒ on garde
+  **NEON + `cnt`** comme chemin livré, mesuré et correct.
 
 ## 2. Les leviers réels (et les faux leviers)
 
