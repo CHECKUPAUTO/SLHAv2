@@ -777,7 +777,14 @@ $\sim\!23\%$ over AVX2: the kernel is short (128 dims) and bound by
 nibble-unpacking/loads, not FMA width. In reference cycles
 (\texttt{rdtsc}): $\sim$942 cyc/tile scalar, $\sim$89 AVX2, $\sim$71
 AVX-512. A NEON path exists and is cross-compile-verified but not timed
-(no ARM hardware on this bench).
+on this (x86-64) bench. SLHA v2 targets \emph{both} families---x86-64
+servers and AArch64 edge devices (e.g.\ Jetson Thor AGX 128,
+Neoverse-V3AE)---and the crate ships a portable \texttt{platform\_report}
+bench kit (and a runner script) that detects features (AVX/NEON/SVE2),
+confirms the cache-line-aware tile alignment, and measures
+wall-clock throughput on whatever CPU runs it. The x86-64 figures above are
+the server baseline; on-device AArch64 numbers are reproduced by running
+the kit on the target rather than fabricated here.
 
 \subsection{Memory traffic vs.\ a bf16 baseline}
 \label{sec:membw}
