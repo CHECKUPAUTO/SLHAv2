@@ -49,7 +49,7 @@ fn dequant_int4(v: &[f32; D_C]) -> [f32; D_C] {
 /// Indices of the `s` largest-magnitude dimensions.
 fn topk_abs(v: &[f32; D_C], s: usize) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..D_C).collect();
-    idx.sort_by(|&a, &b| v[b].abs().partial_cmp(&v[a].abs()).unwrap());
+    idx.sort_by(|&a, &b| v[b].abs().total_cmp(&v[a].abs()));
     idx.truncate(s);
     idx
 }

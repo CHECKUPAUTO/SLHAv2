@@ -67,7 +67,7 @@ impl LearnedModel {
         let (eigvals, eigvecs) = jacobi_eigh(&cov, d);
 
         let mut idx: Vec<usize> = (0..d).collect();
-        idx.sort_by(|&a, &b| eigvals[b].partial_cmp(&eigvals[a]).unwrap());
+        idx.sort_by(|&a, &b| eigvals[b].total_cmp(&eigvals[a]));
 
         let total: f64 = eigvals.iter().map(|&x| x.max(0.0)).sum();
         let kept: f64 = idx[..D_C].iter().map(|&i| eigvals[i].max(0.0)).sum();

@@ -43,7 +43,7 @@ pub fn pearson(x: &[f32], y: &[f32]) -> f32 {
 /// continuous (no ties) for the synthetic data used here.
 pub fn ranks(v: &[f32]) -> Vec<f32> {
     let mut idx: Vec<usize> = (0..v.len()).collect();
-    idx.sort_by(|&a, &b| v[a].partial_cmp(&v[b]).unwrap());
+    idx.sort_by(|&a, &b| v[a].total_cmp(&v[b]));
     let mut r = vec![0.0f32; v.len()];
     for (rank, &i) in idx.iter().enumerate() {
         r[i] = rank as f32;
@@ -61,7 +61,7 @@ pub fn spearman(x: &[f32], y: &[f32]) -> f32 {
 pub fn topk_overlap(truth: &[f32], approx: &[f32], k: usize) -> f32 {
     let top = |v: &[f32]| -> HashSet<usize> {
         let mut idx: Vec<usize> = (0..v.len()).collect();
-        idx.sort_by(|&a, &b| v[b].partial_cmp(&v[a]).unwrap());
+        idx.sort_by(|&a, &b| v[b].total_cmp(&v[a]));
         idx.truncate(k);
         idx.into_iter().collect()
     };
