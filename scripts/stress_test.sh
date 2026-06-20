@@ -8,7 +8,9 @@
 #
 # Usage:
 #   scripts/stress_test.sh             # full suite (debug + release)
-#   scripts/stress_test.sh --quick     # skip release rebuild/tests + soak (fast)
+#   scripts/stress_test.sh --quick     # skip the separate release workspace
+#                                      # build + release tests + soak (examples
+#                                      # still run in release)
 #   scripts/stress_test.sh --soak N    # additionally run the throughput example N times
 #   scripts/stress_test.sh --no-cross  # skip the aarch64 cross-compile step
 #   scripts/stress_test.sh -h          # this help
@@ -126,8 +128,12 @@ else
 fi
 
 # ── 5. exercise every example ───────────────────────────────────────────────
-banner "5. Exercise every example"
-BUILD_FLAG=""; [ $QUICK -eq 0 ] && BUILD_FLAG="--release"
+banner "5. Exercise every example (release)"
+# Examples are perf demonstrations; always run them in release so they are fast
+# and representative — debug-mode SGD/throughput loops are pointlessly slow and
+# can hit the per-step timeout. (--quick only skips the separate release
+# workspace build/test in sections 2–3, not the examples.)
+BUILD_FLAG="--release"
 export BUILD_FLAG
 shopt -s nullglob
 for f in scirust/examples/*.rs; do
