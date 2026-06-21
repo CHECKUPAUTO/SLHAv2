@@ -25,6 +25,12 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
   antérieur** (`--diff PRIOR.json`, exit ≠ 0 sur régression). Code de sortie ≠ 0
   si un contrôle échoue. +9 tests (JSON 5, audit 4) → **50 tests** (scirust).
   Réutilisé par le serveur `slha-mcp` (ci-dessus).
+- **Prêt pour crates.io / docs.rs** : métadonnées de publication sur `scirust`
+  (`keywords`, `categories`, `readme`, `documentation`, `rust-version`) ;
+  `cargo publish -p scirust --dry-run` passe (35 fichiers, sans avertissement).
+  `slha-mcp` reçoit aussi les métadonnées et une dépendance `scirust` versionnée
+  (publiable une fois `scirust` sur crates.io). **MSRV = 1.89** (intrinsèques
+  AVX-512 stabilisées en 1.89 ; `usize::is_multiple_of` en 1.87).
 - **Fichiers de licence** `LICENSE-MIT` + `LICENSE-APACHE` à la racine (le crate
   déclarait `MIT OR Apache-2.0` sans fournir les textes ; lien `LICENSE` du
   README désormais valide). Conformité double-licence façon écosystème Rust.
@@ -57,6 +63,9 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
   la baseline serveur.
 
 ### Changed / Corrected
+- **CI durcie** : ajout de `cargo doc` (warnings = erreurs), exécution
+  bout-en-bout de **`slha-audit`**, `cargo publish -p scirust --dry-run`, et un
+  **job MSRV (Rust 1.89)** qui vérifie tout le workspace `--all-targets`.
 - **Durcissement NaN des tris flottants** (`metrics::ranks`/`topk_overlap`,
   `learned::fit`, exemple `salient_outliers`) : `partial_cmp().unwrap()` →
   `f32/f64::total_cmp` (ordre total sans panique). Comportement identique sur
