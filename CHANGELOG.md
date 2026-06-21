@@ -6,6 +6,16 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
 ## [Unreleased]
 
 ### Added
+- **Outil d'auto-audit `slha-audit`** (bin) + modules `scirust::audit` et
+  `scirust::json` (JSON **sans dépendance** : valeur + sérialiseur + parseur).
+  L'audit exécute tous les invariants à l'exécution — layout de tuile (128 o,
+  zéro padding, alignement), **équivalence SIMD ≡ scalaire** *live*, features
+  CPU + niveaux de cache, **fidélité de sortie** vs attention complète,
+  **invariant de budget CCOS**, déterminisme — et rend un rapport **Markdown**
+  ou **JSON** (`--json`/`--pretty`/`--out FILE`), avec **diff vs un rapport
+  antérieur** (`--diff PRIOR.json`, exit ≠ 0 sur régression). Code de sortie ≠ 0
+  si un contrôle échoue. +9 tests (JSON 5, audit 4) → **50 tests**. Réutilisable
+  par le futur serveur `slha-mcp`.
 - **Fichiers de licence** `LICENSE-MIT` + `LICENSE-APACHE` à la racine (le crate
   déclarait `MIT OR Apache-2.0` sans fournir les textes ; lien `LICENSE` du
   README désormais valide). Conformité double-licence façon écosystème Rust.
@@ -13,8 +23,8 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
   qualité complète (fmt, clippy `-D warnings`, build debug+release, tests
   debug+release, doc, benches, cross-compile aarch64), **lance les 11 exemples**,
   vérifie le **déterminisme** de sortie, propose un mode **soak**, et **génère un
-  rapport Markdown + JSON horodaté** sous `target/stress/` (auditable). Suite de
-  tests inchangée : **41 tests** verts.
+  rapport Markdown + JSON horodaté** sous `target/stress/` (auditable). Lance
+  aussi `slha-audit` ; suite à **50 tests** verts.
 - **Alignement adaptatif à l'hôte via `build.rs`** (`SciRustSlhaTile`, §3.1) :
   script de build sans dépendance qui sonde la **taille de ligne L1d réelle de
   l'hôte** sur une *build native* (triplet hôte == cible ; `sysfs` Linux ou

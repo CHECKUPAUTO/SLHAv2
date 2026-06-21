@@ -70,6 +70,28 @@ Dequantized latent[0..4]: [-4.0, -4.0, -4.0, -4.0]
 
 ---
 
+## Auditer le système (`slha-audit`)
+
+Un outil dédié vérifie que tout est sain et **génère un rapport** (Markdown ou
+JSON) — pratique en CI, pour un agent, ou comme trace d'audit :
+
+```bash
+cargo run --bin slha-audit                              # rapport Markdown lisible
+cargo run --bin slha-audit -- --json --out audit.json   # rapport machine (JSON)
+cargo run --bin slha-audit -- --diff audit.json         # diff vs un rapport antérieur (régression)
+```
+
+Il contrôle, **à l'exécution** : le layout de tuile (128 o, zéro padding,
+alignement), l'**équivalence SIMD ≡ scalaire** (le chemin AVX-512/NEON rend le
+même score que la référence), les features CPU + niveaux de cache, la **fidélité
+de sortie** vs attention complète, l'**invariant de budget CCOS**, et le
+**déterminisme**. Code de sortie ≠ 0 si un contrôle échoue.
+
+Pour éprouver tout le produit d'un coup (gate qualité + tous les exemples +
+rapport horodaté) : `./scripts/stress_test.sh`.
+
+---
+
 ## Intégrer SLHA v2 dans mon projet
 
 ### Projet Rust
@@ -132,7 +154,7 @@ Voir le [guide d'intégration](docs/INTEGRATION.md) — **esquisse de conception
 
 ## État du projet
 
-- ✅ **Mécanisme validé** : **41 tests** (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS), clippy `-D warnings` clean, CI
+- ✅ **Mécanisme validé** : **50 tests** (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS), clippy `-D warnings` clean, CI
 - ✅ **Performance** : x86 **AVX2 ~×11,5 / AVX-512 ~×14,1** ; ARM **NEON ~×5,7** (mesuré sur Jetson Thor AGX 128) — vs scalaire
 - ✅ **Multi-plateforme** : x86_64 (AVX2/AVX-512/VPOPCNTDQ) + ARM AArch64 (NEON, **mesuré sur Jetson Thor** ; `sve2` détecté) — kit `examples/platform_report`
 - ✅ **Fidélité** : cosinus 0,95–0,997 vs attention complète (sortie `softmax·V`)
@@ -152,7 +174,7 @@ et les [issues](https://github.com/CHECKUPAUTO/SLHAv2/issues).
 ```bash
 git clone https://github.com/CHECKUPAUTO/SLHAv2.git
 cd SLHAv2
-cargo test                              # 41 tests, doivent passer
+cargo test                              # 50 tests, doivent passer
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```

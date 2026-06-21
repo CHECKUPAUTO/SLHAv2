@@ -22,7 +22,9 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod attention;
+pub mod audit;
 pub mod ccos;
+pub mod json;
 pub mod learned;
 pub mod linalg;
 pub mod metrics;

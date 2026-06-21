@@ -27,7 +27,7 @@ mesures ont **réellement** établi. Toutes les valeurs sont reproductibles
 
 - **Le mécanisme est correct et implémentable.** Tuile 128 o sans gaspillage,
   score fusionné conforme à l'éq. (2.3), kernels scalaire/AVX2/AVX-512/NEON
-  **prouvés équivalents** (41 tests dont property/fuzz, clippy `-D warnings`, CI).
+  **prouvés équivalents** (50 tests dont property/fuzz, clippy `-D warnings`, CI).
 - **Le « Soft-Paging » tient — et tourne.** À faible énergie résiduelle, libérer
   le résidu 1-bit (WARM) est quasi sans perte ; le résidu redevient utile quand
   la base bas-rang laisse passer de l'énergie. La politique HOT/WARM/COLD est
@@ -108,4 +108,4 @@ mesures ont **réellement** établi. Toutes les valeurs sont reproductibles
    bout** (et non au seul niveau kernel).
 
 ---
-*Réf. : crate `scirust/` (41 tests dont property/fuzz + doctests + calibration λ + CCOS, criterion, CI), paper `SLHAv2.md` §1–8.*
+*Réf. : crate `scirust/` (50 tests dont property/fuzz + doctests + calibration λ + CCOS, criterion, CI), paper `SLHAv2.md` §1–8.*

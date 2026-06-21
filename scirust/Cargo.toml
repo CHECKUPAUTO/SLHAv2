@@ -11,6 +11,12 @@ repository = "https://github.com/CHECKUPAUTO/SLHAv2"
 name = "scirust"
 path = "src/lib.rs"
 
+# Dedicated self-audit CLI: `cargo run --bin slha-audit -- [--json|--pretty]`.
+# Reuses the in-crate `audit` + `json` modules (no extra deps).
+[[bin]]
+name = "slha-audit"
+path = "src/bin/slha_audit.rs"
+
 # The library itself has ZERO external dependencies (it builds offline and adds
 # nothing to a consumer's tree). It ships a tiny, std-only `build.rs` that probes
 # the native host's cache-line size to choose the tile alignment — it pulls in no

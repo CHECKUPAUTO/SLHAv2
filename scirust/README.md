@@ -14,7 +14,7 @@ Hybrid Attention) décrit dans [`../SLHAv2.md`](../SLHAv2.md).
 ## Build / test / mesure
 
 ```sh
-cargo test                                       # 41 tests : unitaires + intégration + property/fuzz + doctests
+cargo test                                       # 50 tests : unitaires + intégration + property/fuzz + doctests
                                                  #  (Hamming, layout 128 o, zero-point, WARM, sign-LSH, Jacobi,
                                                  #   PCA, MX, NF4, sortie d'attention, SGD, SIMD≡scalaire, calibration λ,
                                                  #   CCOS Soft-Paging : page_out/evict/budget/recyclage de slots ;
@@ -31,7 +31,10 @@ cargo run --example cycles --release              # cycles/tuile (rdtsc) : scala
 cargo run --example ccos_softpaging --release     # cache KV élastique : Soft-Paging HOT/WARM/COLD sous budget
 cargo run --example platform_report --release     # kit multi-plateforme : features SIMD, cache, débit (x86 & ARM)
 cargo run --example salient_outliers --release    # étude BiLLM : canaux outliers + préservation FP saillante
+cargo run --bin slha-audit                         # auto-audit : invariants tuile, équivalence SIMD, fidélité, CCOS → Markdown
+cargo run --bin slha-audit -- --json               # même rapport en JSON (CI / agents) ; --out FILE, --diff PRIOR.json
 ./scripts/bench_device.sh                          # lance le kit + exemples §7 sur l'appareil → results_<arch>.txt
+./scripts/stress_test.sh                           # harnais massif : gate qualité + 11 exemples + rapport horodaté
 ```
 
 **Bibliothèque sans dépendance** : la lib n'ajoute rien à l'arbre d'un
@@ -65,6 +68,9 @@ faible énergie résiduelle, gains du résidu 1-bit modérés à `d_s = 256`.
 | `scenario.rs` | Projection sign-LSH, génération de contexte à énergie résiduelle `rho` contrôlable |
 | `metrics.rs` | `dot`, Pearson, Spearman, top-k overlap |
 | `rng.rs` | PRNG déterministe (SplitMix64) + échantillonneur gaussien |
+| `json.rs` | JSON minimal **sans dépendance** (valeur + sérialiseur compact/joli + parseur) — partagé par l'audit et `slha-mcp` |
+| `audit.rs` | Auto-audit : invariants tuile, équivalence SIMD≡scalaire *live*, features/cache, fidélité, budget CCOS, déterminisme → `Json` + Markdown + `diff` |
+| `bin/slha_audit.rs` | CLI **`slha-audit`** (Markdown / `--json` / `--out` / `--diff PRIOR.json`) |
 | `../tests/slha.rs` | Tests d'intégration (preuves) |
 | `../tests/properties.rs` | Tests randomisés property / fuzz (zéro-dépendance) |
 | `../benches/kernel.rs` | Micro-benchs criterion du kernel |

@@ -142,6 +142,10 @@ for f in scirust/examples/*.rs; do
 done
 shopt -u nullglob
 
+# ── 5b. self-audit (runs every internal invariant; exit != 0 if any fails) ──
+banner "5b. Self-audit (slha-audit)"
+step "slha-audit --json" 180 -- cargo run -q $BUILD_FLAG --bin slha-audit -- --json
+
 # ── 6. determinism (reproducibility claim) ──────────────────────────────────
 banner "6. Determinism (same input ⇒ same output)"
 step "determinism: basic_usage ×2" 180 -- bash -c '
