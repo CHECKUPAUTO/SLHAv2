@@ -6,6 +6,15 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
 ## [Unreleased]
 
 ### Added
+- **Serveur MCP `slha-mcp`** (nouveau crate du workspace, **zéro dépendance
+  externe** — réutilise `scirust::json`) : serveur Model Context Protocol sur
+  **stdio** (JSON-RPC 2.0 délimité par lignes) qui expose le noyau et l'auto-audit
+  SLHA comme **outils appelables par un agent** (Claude Code / Desktop, ou tout
+  client MCP). 5 outils : `slha.audit`, `slha.explain`, `slha.compress`,
+  `slha.score`, `slha.benchmark`. Branchement :
+  `claude mcp add slha -- .../target/release/slha-mcp`. Guide complet
+  `docs/MCP.md`. +7 tests de dispatch → **57 tests** (workspace : 50 scirust + 7
+  slha-mcp).
 - **Outil d'auto-audit `slha-audit`** (bin) + modules `scirust::audit` et
   `scirust::json` (JSON **sans dépendance** : valeur + sérialiseur + parseur).
   L'audit exécute tous les invariants à l'exécution — layout de tuile (128 o,
@@ -14,8 +23,8 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
   **invariant de budget CCOS**, déterminisme — et rend un rapport **Markdown**
   ou **JSON** (`--json`/`--pretty`/`--out FILE`), avec **diff vs un rapport
   antérieur** (`--diff PRIOR.json`, exit ≠ 0 sur régression). Code de sortie ≠ 0
-  si un contrôle échoue. +9 tests (JSON 5, audit 4) → **50 tests**. Réutilisable
-  par le futur serveur `slha-mcp`.
+  si un contrôle échoue. +9 tests (JSON 5, audit 4) → **50 tests** (scirust).
+  Réutilisé par le serveur `slha-mcp` (ci-dessus).
 - **Fichiers de licence** `LICENSE-MIT` + `LICENSE-APACHE` à la racine (le crate
   déclarait `MIT OR Apache-2.0` sans fournir les textes ; lien `LICENSE` du
   README désormais valide). Conformité double-licence façon écosystème Rust.
