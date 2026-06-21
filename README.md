@@ -92,6 +92,23 @@ rapport horodaté) : `./scripts/stress_test.sh`.
 
 ---
 
+## Connecter un agent / LLM (MCP)
+
+Un serveur **MCP** (`slha-mcp`, **zéro dépendance**) expose le noyau et l'audit
+SLHA comme **outils appelables par un agent** (Claude Code / Desktop, ou tout
+client MCP) :
+
+```bash
+cargo build --release -p slha-mcp
+claude mcp add slha -- "$(pwd)/target/release/slha-mcp"
+```
+
+L'agent dispose alors de 5 outils : `slha.audit`, `slha.explain`,
+`slha.compress`, `slha.score`, `slha.benchmark`. Config Claude Desktop, schéma
+des outils et exemple de session : [`docs/MCP.md`](docs/MCP.md).
+
+---
+
 ## Intégrer SLHA v2 dans mon projet
 
 ### Projet Rust
@@ -144,6 +161,7 @@ Voir le [guide d'intégration](docs/INTEGRATION.md) — **esquisse de conception
 | Document | Pour qui | Contenu |
 |---|---|---|
 | [**Premiers pas**](docs/GETTING_STARTED.md) | Débutants | Installation, premier essai, concepts |
+| [**Connexion MCP**](docs/MCP.md) | Agents / LLM | Brancher un agent sur les outils SLHA (audit, score, benchmark) |
 | [**Guide d'intégration**](docs/INTEGRATION.md) | Développeurs | Esquisse pour llama.cpp, Ollama, vLLM |
 | [**Spécification**](SLHAv2.md) | Chercheurs | Maths complètes + résultats §7 |
 | [**Résultats**](FINDINGS.md) | Curieux | Ce qu'on a mesuré, ce qui marche, ce qui reste |
@@ -159,7 +177,8 @@ Voir le [guide d'intégration](docs/INTEGRATION.md) — **esquisse de conception
 - ✅ **Multi-plateforme** : x86_64 (AVX2/AVX-512/VPOPCNTDQ) + ARM AArch64 (NEON, **mesuré sur Jetson Thor** ; `sve2` détecté) — kit `examples/platform_report`
 - ✅ **Fidélité** : cosinus 0,95–0,997 vs attention complète (sortie `softmax·V`)
 - ✅ **Soft-Paging** : cache KV élastique (`ccos::ElasticKvCache`) — pager la moitié des tuiles HOT→WARM laisse la sortie à **cos 0,9995** (`examples/ccos_softpaging`, §4)
-- ⏳ **Intégration LLM réel** + perplexité : à venir (hors banc actuel)
+- ✅ **Auto-audit + accès agent** : outil `slha-audit` (rapports JSON/Markdown) et serveur **MCP** `slha-mcp` (5 outils, zéro dépendance) — [`docs/MCP.md`](docs/MCP.md)
+- ⏳ **Intégration LLM réel** (greffon KV-cache llama.cpp/vLLM) + perplexité : à venir (hors banc actuel)
 
 > Réserves d'honnêteté (projections synthétiques, `perf`/perplexité hors banc) :
 > voir [`FINDINGS.md`](FINDINGS.md) et `SLHAv2.md` §6–7.

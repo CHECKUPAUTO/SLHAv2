@@ -1,0 +1,19 @@
+# slha-mcp — Model Context Protocol (stdio) server for SLHA v2.
+#
+# Zero EXTERNAL dependencies: the only dependency is the in-repo `scirust` crate,
+# whose `json` module provides all JSON-RPC (de)serialization. The MCP server
+# therefore inherits SLHA v2's zero-dependency property.
+[package]
+name = "slha-mcp"
+version = "0.2.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "MCP (Model Context Protocol) stdio server exposing the SLHA v2 kernel and self-audit to LLM agents — zero external dependencies."
+repository = "https://github.com/CHECKUPAUTO/SLHAv2"
+
+[dependencies]
+scirust = { path = "../scirust" }
+
+[[bin]]
+name = "slha-mcp"
+path = "src/main.rs"
