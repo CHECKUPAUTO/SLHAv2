@@ -14,7 +14,7 @@ Hybrid Attention) décrit dans [`../SLHAv2.md`](../SLHAv2.md).
 ## Build / test / mesure
 
 ```sh
-cargo test                                       # 50 tests : unitaires + intégration + property/fuzz + doctests
+cargo test                                       # 51 tests : unitaires + intégration + property/fuzz + doctests
                                                  #  (Hamming, layout 128 o, zero-point, WARM, sign-LSH, Jacobi,
                                                  #   PCA, MX, NF4, sortie d'attention, SGD, SIMD≡scalaire, calibration λ,
                                                  #   CCOS Soft-Paging : page_out/evict/budget/recyclage de slots ;
@@ -47,7 +47,8 @@ property/fuzz restent eux aussi sans dépendance.
 API sûre (pas de `read_volatile`), sémantique exacte, avec des **chemins SIMD
 AVX2, AVX-512 (x86_64) et NEON (aarch64)** dispatchés à l'exécution + repli
 scalaire portable, chacun avec un test d'équivalence ≡ scalaire (AVX2 ~×11,5,
-AVX-512 ~×14,1 vs scalaire). NEON **mesuré sur Jetson Thor AGX 128**
+AVX-512 ~×14,1 vs scalaire, **banc Xeon partagé** — ratios indicatifs, dépendants
+du matériel et de l'auto-vectorisation). NEON **mesuré sur Jetson Thor AGX 128**
 (Neoverse-V3AE) : ~**×5,7** vs scalaire (via le kit `platform_report`). Un
 chemin popcount **AVX-512 VPOPCNTDQ** existe aussi (sélection à l'exécution).
 

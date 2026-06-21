@@ -10,7 +10,7 @@ La CI exige que ces commandes passent — lancez-les en local :
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace          # 57 tests (50 scirust + 7 slha-mcp ; unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS + MCP)
+cargo test --workspace          # 58 tests (51 scirust + 7 slha-mcp ; unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS + MCP)
 cargo build --workspace --all-targets
 cargo bench --workspace --no-run
 ```

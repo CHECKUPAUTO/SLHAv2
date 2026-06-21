@@ -140,7 +140,8 @@ no-op trompeuses — supprimées.) La bibliothèque est **sans dépendance** ;
 | Scalaire | ~3,0 M scores/s | 1× |
 | NEON | ~17,1 M scores/s | **~×5,7** |
 
-(Lignes de cache à 64 o à tous les niveaux ; `sve2` présent. Reproductible via
+(Lignes de cache à 64 o à tous les niveaux ; `sve2` présent. **Ratios
+indicatifs — ils dépendent du CPU et de l'auto-vectorisation.** Reproductible via
 `cargo run --release -p scirust --example platform_report`.)
 
 - **Mémoire :** tuile 128 o/token contre 256 o pour une clé bf16 → **~2,5×**
@@ -181,7 +182,7 @@ Voir aussi `scirust/examples/basic_usage.rs` (exemple exécutable identique).
 ## Build / test / bench (depuis la racine, workspace)
 
 ```sh
-cargo test                 # 50 tests (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS + JSON + audit)
+cargo test                 # 51 tests (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS + JSON + audit)
 cargo bench                # micro-benchs criterion (scalaire / AVX2 / AVX-512)
 cargo run -p scirust --example basic_usage
 cargo run --release -p scirust --example platform_report   # kit x86/ARM : features SIMD, cache, débit

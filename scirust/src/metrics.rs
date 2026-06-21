@@ -22,6 +22,9 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
 /// Pearson correlation coefficient (linear / magnitude fidelity).
 pub fn pearson(x: &[f32], y: &[f32]) -> f32 {
     assert_eq!(x.len(), y.len());
+    if x.is_empty() {
+        return 0.0;
+    }
     let n = x.len() as f32;
     let mx = x.iter().sum::<f32>() / n;
     let my = y.iter().sum::<f32>() / n;
@@ -58,7 +61,11 @@ pub fn spearman(x: &[f32], y: &[f32]) -> f32 {
 }
 
 /// Fraction of the top-`k` indices shared between two score vectors.
+/// `k == 0` returns `0.0` (rather than `NaN` from dividing by `k`).
 pub fn topk_overlap(truth: &[f32], approx: &[f32], k: usize) -> f32 {
+    if k == 0 {
+        return 0.0;
+    }
     let top = |v: &[f32]| -> HashSet<usize> {
         let mut idx: Vec<usize> = (0..v.len()).collect();
         idx.sort_by(|&a, &b| v[b].total_cmp(&v[a]));
@@ -71,8 +78,12 @@ pub fn topk_overlap(truth: &[f32], approx: &[f32], k: usize) -> f32 {
 }
 
 /// Root-mean-square value of a slice (used as a per-tile sigma_E estimate).
+/// Empty input returns `0.0` (rather than `NaN` from `0/0`).
 #[inline]
 pub fn rms(v: &[f32]) -> f32 {
+    if v.is_empty() {
+        return 0.0;
+    }
     (v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32).sqrt()
 }
 
@@ -128,5 +139,38 @@ pub fn softmax_into(scores: &[f32], scale: f32, out: &mut [f32]) {
     let inv = 1.0 / sum;
     for o in out.iter_mut() {
         *o *= inv;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Degenerate inputs (empty slices, `k == 0`, zero vectors) must return a
+    /// finite `0.0` rather than `NaN`/`Inf` from a `0/0` or `x/0`.
+    #[test]
+    fn degenerate_inputs_stay_finite() {
+        let empty: &[f32] = &[];
+        assert_eq!(rms(empty), 0.0);
+        assert_eq!(dot(empty, empty), 0.0);
+        assert_eq!(pearson(empty, empty), 0.0);
+        assert_eq!(spearman(empty, empty), 0.0);
+        assert_eq!(cosine(empty, empty), 0.0);
+        assert_eq!(rel_l2(empty, empty), 0.0);
+        assert_eq!(topk_overlap(&[1.0, 2.0], &[2.0, 1.0], 0), 0.0);
+        assert_eq!(cosine(&[0.0, 0.0], &[0.0, 0.0]), 0.0); // zero norm
+
+        let mut out: [f32; 0] = [];
+        softmax_into(empty, 1.0, &mut out); // must not panic
+
+        for v in [
+            rms(empty),
+            pearson(empty, empty),
+            cosine(empty, empty),
+            rel_l2(empty, empty),
+            topk_overlap(empty, empty, 0),
+        ] {
+            assert!(v.is_finite(), "expected finite, got {v}");
+        }
     }
 }

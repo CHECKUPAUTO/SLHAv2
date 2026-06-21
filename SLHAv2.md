@@ -257,7 +257,7 @@ Les limitations de la v1 sont **levées** dans le crate `scirust` (`cargo test` 
 - ✅ **`read_volatile` supprimé.** Le chemin chaud lit des `slice`s normaux : LLVM peut de nouveau auto-vectoriser et réordonner. La spécialisation SIMD n'est pas encore écrite, mais elle n'est plus **bloquée**.
 - ✅ **INT4 signé (zero-point).** La déquantification est `(nibble − 8)·scale` : la base bas-rang représente désormais des valeurs négatives. Garanti par le test `int4_dequant_round_trips_signed_values`.
 - ✅ **API sûre, pas de `target_feature` trompeur.** Plus d'`unsafe`, plus d'import mort, plus de gate `avx2` sans intrinsèque ; `count_ones()` se compile en `POPCNT` quand la cible le supporte, avec repli portable (ARM Neoverse/Thor inclus).
-- ✅ **Tuile = 128 o sans padding** et **crate compilable + testé** : **50 tests** (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS Soft-Paging), dont l'identité de Hamming `d_s − 2·popcount` prouvée contre une référence brute, l'équivalence SIMD ≡ scalaire (fuzz randomisé), la finitude des scores, et la correspondance code ↔ eq. (2.3).
+- ✅ **Tuile = 128 o sans padding** et **crate compilable + testé** : **51 tests** (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS Soft-Paging), dont l'identité de Hamming `d_s − 2·popcount` prouvée contre une référence brute, l'équivalence SIMD ≡ scalaire (fuzz randomisé), la finitude des scores, et la correspondance code ↔ eq. (2.3).
 
 **Avancées récentes & restant :**
 
@@ -345,7 +345,7 @@ Pour lever la réserve « base idéale », `measure_learned` **apprend** la proj
 
 ### 7.4 Débit (scalaire vs AVX2 / AVX-512 / NEON)
 
-Le kernel dispose de chemins **AVX2** et **AVX-512** (dispatch à l'exécution via `is_x86_feature_detected!`, ordre AVX-512 > AVX2 > scalaire, repli portable), chacun avec un **test d'équivalence** ≡ scalaire. Sur le banc partagé :
+Le kernel dispose de chemins **AVX2** et **AVX-512** (dispatch à l'exécution via `is_x86_feature_detected!`, ordre AVX-512 > AVX2 > scalaire, repli portable), chacun avec un **test d'équivalence** ≡ scalaire. Sur le banc partagé (**x86, Xeon** ; les ratios dépendent du CPU et de l'auto-vectorisation) :
 
 | Chemin | Débit | Rapport |
 |---|---|---|

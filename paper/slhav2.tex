@@ -509,7 +509,7 @@ invariant in the hot loops. Salient engineering properties:
   \item \textbf{Zero dependencies.} The library has no runtime
     dependencies; \texttt{criterion} is a dev-only dependency for
     micro-benchmarks.
-  \item \textbf{Tested equivalence.} 50 tests (unit, integration,
+  \item \textbf{Tested equivalence.} 51 tests (unit, integration,
     property/fuzz, doctests, $\lambda$ calibration, Soft-Paging) assert,
     among other things, SIMD $\equiv$ scalar (randomized fuzz; AVX2,
     AVX-512, VPOPCNTDQ, NEON), the budget invariants of
@@ -1007,7 +1007,7 @@ real-hardware and real-model validation. We release the reference
 implementation, benchmarks, and tests to make every claim reproducible.
 
 \paragraph{Reproducibility.}
-The reference crate (\textsc{SciRust}), all benchmarks, and the 50 tests
+The reference crate (\textsc{SciRust}), all benchmarks, and the 51 tests
 backing the numbers in \S\ref{sec:eval} are available in the project
 repository; every measurement uses fixed random seeds.
 
