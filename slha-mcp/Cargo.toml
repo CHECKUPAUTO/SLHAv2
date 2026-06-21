@@ -7,12 +7,19 @@
 name = "slha-mcp"
 version = "0.2.0"
 edition = "2021"
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 description = "MCP (Model Context Protocol) stdio server exposing the SLHA v2 kernel and self-audit to LLM agents — zero external dependencies."
 repository = "https://github.com/CHECKUPAUTO/SLHAv2"
+homepage = "https://github.com/CHECKUPAUTO/SLHAv2"
+readme = "../docs/MCP.md"
+keywords = ["mcp", "llm", "agent", "kv-cache", "attention"]
+categories = ["command-line-utilities", "science"]
 
 [dependencies]
-scirust = { path = "../scirust" }
+# `version` makes this publish-ready once `scirust` is on crates.io; `path` is
+# used for local/workspace builds (cargo strips the path on publish).
+scirust = { version = "0.2", path = "../scirust" }
 
 [[bin]]
 name = "slha-mcp"

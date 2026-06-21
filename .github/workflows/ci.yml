@@ -21,7 +21,24 @@ jobs:
         run: cargo build --workspace --all-targets
       - name: Tests (unit + integration + property/fuzz + doctests)
         run: cargo test --workspace
+      - name: Docs (warnings = errors)
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: Self-audit (slha-audit end-to-end)
+        run: cargo run --bin slha-audit -- --json
       - name: Benchmarks compile
         run: cargo bench --workspace --no-run
       - name: NEON path cross-compile check (aarch64)
         run: cargo build -p scirust --lib --target aarch64-unknown-linux-gnu
+      - name: Publish dry-run (scirust is crates.io-ready)
+        run: cargo publish -p scirust --dry-run
+
+  msrv:
+    name: MSRV (Rust 1.89)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - name: Check workspace on the declared MSRV
+        run: cargo check --workspace --all-targets
