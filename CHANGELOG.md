@@ -63,6 +63,16 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
   la baseline serveur.
 
 ### Changed / Corrected
+- **Robustesse & finitude (nits)** :
+  - `install.sh` fonctionne désormais sous `curl | bash` — les prompts lisent
+    `/dev/tty` (ou prennent le défaut affiché en non-interactif au lieu
+    d'avorter sur EOF) ; au passage, le chemin « garder le dossier existant » ne
+    re-clone plus en double (bug `cd` imbriqué corrigé).
+  - `metrics` : `rms([])`, `topk_overlap(.., 0)` et `pearson([], [])` renvoient
+    `0.0` (fini) au lieu de `NaN` (division `0/0`) ; test de finitude ajouté
+    (→ **51 tests** scirust, **58** workspace).
+  - Docs : caveat « ratios SIMD **indicatifs, dépendants du matériel** » près des
+    chiffres x86 (banc Xeon), par symétrie avec les chiffres ARM déjà qualifiés.
 - **CI durcie** : ajout de `cargo doc` (warnings = erreurs), exécution
   bout-en-bout de **`slha-audit`**, `cargo publish -p scirust --dry-run`, et un
   **job MSRV (Rust 1.89)** qui vérifie tout le workspace `--all-targets`.

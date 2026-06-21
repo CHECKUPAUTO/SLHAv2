@@ -172,8 +172,8 @@ Voir le [guide d'intégration](docs/INTEGRATION.md) — **esquisse de conception
 
 ## État du projet
 
-- ✅ **Mécanisme validé** : **50 tests** (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS), clippy `-D warnings` clean, CI
-- ✅ **Performance** : x86 **AVX2 ~×11,5 / AVX-512 ~×14,1** ; ARM **NEON ~×5,7** (mesuré sur Jetson Thor AGX 128) — vs scalaire
+- ✅ **Mécanisme validé** : **51 tests** (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS), clippy `-D warnings` clean, CI
+- ✅ **Performance** : x86 **AVX2 ~×11,5 / AVX-512 ~×14,1** (banc Xeon partagé) ; ARM **NEON ~×5,7** (Jetson Thor AGX 128) — vs scalaire. _Ratios **indicatifs**, dépendants du CPU et de l'auto-vectorisation ; mesurez les vôtres : `cargo run --example cycles --release`._
 - ✅ **Multi-plateforme** : x86_64 (AVX2/AVX-512/VPOPCNTDQ) + ARM AArch64 (NEON, **mesuré sur Jetson Thor** ; `sve2` détecté) — kit `examples/platform_report`
 - ✅ **Fidélité** : cosinus 0,95–0,997 vs attention complète (sortie `softmax·V`)
 - ✅ **Soft-Paging** : cache KV élastique (`ccos::ElasticKvCache`) — pager la moitié des tuiles HOT→WARM laisse la sortie à **cos 0,9995** (`examples/ccos_softpaging`, §4)
@@ -193,7 +193,7 @@ et les [issues](https://github.com/CHECKUPAUTO/SLHAv2/issues).
 ```bash
 git clone https://github.com/CHECKUPAUTO/SLHAv2.git
 cd SLHAv2
-cargo test                              # 50 tests, doivent passer
+cargo test                              # 51 tests, doivent passer
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
