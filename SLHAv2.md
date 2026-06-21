@@ -257,7 +257,7 @@ Les limitations de la v1 sont **levées** dans le crate `scirust` (`cargo test` 
 - ✅ **`read_volatile` supprimé.** Le chemin chaud lit des `slice`s normaux : LLVM peut de nouveau auto-vectoriser et réordonner. La spécialisation SIMD n'est pas encore écrite, mais elle n'est plus **bloquée**.
 - ✅ **INT4 signé (zero-point).** La déquantification est `(nibble − 8)·scale` : la base bas-rang représente désormais des valeurs négatives. Garanti par le test `int4_dequant_round_trips_signed_values`.
 - ✅ **API sûre, pas de `target_feature` trompeur.** Plus d'`unsafe`, plus d'import mort, plus de gate `avx2` sans intrinsèque ; `count_ones()` se compile en `POPCNT` quand la cible le supporte, avec repli portable (ARM Neoverse/Thor inclus).
-- ✅ **Tuile = 128 o sans padding** et **crate compilable + testé** : **41 tests** (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS Soft-Paging), dont l'identité de Hamming `d_s − 2·popcount` prouvée contre une référence brute, l'équivalence SIMD ≡ scalaire (fuzz randomisé), la finitude des scores, et la correspondance code ↔ eq. (2.3).
+- ✅ **Tuile = 128 o sans padding** et **crate compilable + testé** : **50 tests** (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS Soft-Paging), dont l'identité de Hamming `d_s − 2·popcount` prouvée contre une référence brute, l'équivalence SIMD ≡ scalaire (fuzz randomisé), la finitude des scores, et la correspondance code ↔ eq. (2.3).
 
 **Avancées récentes & restant :**
 

@@ -181,11 +181,27 @@ Voir aussi `scirust/examples/basic_usage.rs` (exemple exécutable identique).
 ## Build / test / bench (depuis la racine, workspace)
 
 ```sh
-cargo test                 # 41 tests (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS)
+cargo test                 # 50 tests (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS + JSON + audit)
 cargo bench                # micro-benchs criterion (scalaire / AVX2 / AVX-512)
 cargo run -p scirust --example basic_usage
 cargo run --release -p scirust --example platform_report   # kit x86/ARM : features SIMD, cache, débit
+cargo run --bin slha-audit                                 # auto-audit → Markdown (--json / --out FILE / --diff PRIOR.json)
 cargo build --workspace --all-targets   # compile lib + tests + benches + exemples
+```
+
+### Auto-audit (`slha-audit`) et modules `audit` / `json`
+
+Le module **`scirust::audit`** exécute tous les invariants du système (layout de
+tuile, équivalence **SIMD ≡ scalaire** *live*, features/cache, fidélité de sortie
+vs attention complète, invariant de budget CCOS, déterminisme) et renvoie un
+[`json::Json`] structuré, plus un rendu Markdown (`audit::to_markdown`) et un
+`audit::diff(prior, current)` (détection de régression). Le binaire
+**`slha-audit`** l'expose en ligne de commande ; le module **`scirust::json`**
+est un JSON minimal **sans dépendance** (réutilisé par le serveur `slha-mcp`).
+
+```sh
+cargo run --bin slha-audit -- --json --out audit.json   # rapport machine
+cargo run --bin slha-audit -- --diff audit.json          # diff vs un rapport antérieur (exit ≠ 0 si changement)
 ```
 
 Sur un appareil ARM (p. ex. Jetson Thor), `platform_report` (ou
