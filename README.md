@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CHECKUPAUTO/SLHAv2/actions/workflows/ci.yml/badge.svg)](https://github.com/CHECKUPAUTO/SLHAv2/actions)
 [![Rust](https://img.shields.io/badge/rust-2021+-blue.svg)](https://rust-lang.org)
-[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-green.svg)](#licence)
 
 ---
 
@@ -161,4 +161,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## Licence
 
-MIT OR Apache-2.0 — [Forge CHECKUPAUTO](https://github.com/CHECKUPAUTO)
+Distribué sous **double licence**, au choix :
+
+- **MIT** — [`LICENSE-MIT`](LICENSE-MIT)
+- **Apache 2.0** — [`LICENSE-APACHE`](LICENSE-APACHE)
+
+Sauf mention contraire, toute contribution soumise sera couverte par cette
+double licence, sans condition supplémentaire (cf. Apache-2.0 §5).
+
+— [Forge CHECKUPAUTO](https://github.com/CHECKUPAUTO)

@@ -6,6 +6,15 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
 ## [Unreleased]
 
 ### Added
+- **Fichiers de licence** `LICENSE-MIT` + `LICENSE-APACHE` à la racine (le crate
+  déclarait `MIT OR Apache-2.0` sans fournir les textes ; lien `LICENSE` du
+  README désormais valide). Conformité double-licence façon écosystème Rust.
+- **Harnais de test massif** `scripts/stress_test.sh` : exécute la barrière
+  qualité complète (fmt, clippy `-D warnings`, build debug+release, tests
+  debug+release, doc, benches, cross-compile aarch64), **lance les 11 exemples**,
+  vérifie le **déterminisme** de sortie, propose un mode **soak**, et **génère un
+  rapport Markdown + JSON horodaté** sous `target/stress/` (auditable). Suite de
+  tests inchangée : **41 tests** verts.
 - **Alignement adaptatif à l'hôte via `build.rs`** (`SciRustSlhaTile`, §3.1) :
   script de build sans dépendance qui sonde la **taille de ligne L1d réelle de
   l'hôte** sur une *build native* (triplet hôte == cible ; `sysfs` Linux ou
@@ -29,6 +38,11 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
   la baseline serveur.
 
 ### Changed / Corrected
+- **Durcissement NaN des tris flottants** (`metrics::ranks`/`topk_overlap`,
+  `learned::fit`, exemple `salient_outliers`) : `partial_cmp().unwrap()` →
+  `f32/f64::total_cmp` (ordre total sans panique). Comportement identique sur
+  données finies ; supprime un risque de panique sur l'API publique en cas de
+  `NaN`/`Inf` en entrée. Repéré par l'audit code.
 - **Statut toolchain SVE2 documenté précisément** (roadmap #1 ; paper Future
   Work, `SLHAv2.md` §7.4, `FINDINGS.md`). Vérifié sur `rustc 1.94.1` : la
   **détection** runtime `is_aarch64_feature_detected!("sve2")` est *stable*,
