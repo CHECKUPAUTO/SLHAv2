@@ -83,7 +83,7 @@ pub enum LatentCodec {
 /// flags 118 | group_scales 120..128.
 #[cfg_attr(cache_line_128, repr(C, align(128)))]
 #[cfg_attr(not(cache_line_128), repr(C, align(64)))]
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct SciRustSlhaTile {
     /// Latent base `h_KV` (128 dims) quantised to signed INT4. 64 bytes.
     pub latent_kv: [u8; LATENT_BYTES],

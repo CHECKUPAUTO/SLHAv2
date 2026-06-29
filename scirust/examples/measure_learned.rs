@@ -28,7 +28,7 @@ fn evaluate(model: &LearnedModel, decay: f32, codec: LatentCodec) -> (f32, f32, 
     for (i, key) in eval.iter().enumerate() {
         s_true.push(dot(q, key));
         let hot: SciRustSlhaTile = model.encode_with(key, i as u32, false, codec);
-        let mut warm = hot.clone();
+        let mut warm = hot;
         warm.flags |= FLAG_WARM;
         s_hot.push(hot.compute_score(&q_coarse, &q_sign));
         s_warm.push(warm.compute_score(&q_coarse, &q_sign));
