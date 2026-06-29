@@ -24,11 +24,13 @@
 pub mod attention;
 pub mod audit;
 pub mod ccos;
+pub mod incoherence;
 pub mod json;
 pub mod learned;
 pub mod linalg;
 pub mod metrics;
 pub mod rng;
+pub mod rope;
 pub mod scenario;
 
 pub use attention::slha_v2::{SciRustSlhaTile, D_C, D_S, LATENT_BYTES, RESIDUAL_WORDS};
