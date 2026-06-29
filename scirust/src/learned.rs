@@ -488,7 +488,7 @@ mod tests {
         for (i, key) in eval.iter().enumerate() {
             s_true.push(dot(q, key));
             let hot = model.encode(key, i as u32, false);
-            let mut warm = hot.clone();
+            let mut warm = hot;
             warm.flags |= FLAG_WARM;
             s_hot.push(hot.compute_score(&q_coarse, &q_sign));
             s_warm.push(warm.compute_score(&q_coarse, &q_sign));
@@ -596,7 +596,7 @@ mod tests {
         let s_warm: Vec<f32> = tiles
             .iter()
             .map(|t| {
-                let mut w = t.clone();
+                let mut w = *t;
                 w.flags |= FLAG_WARM;
                 w.compute_score(&qc, &qs)
             })

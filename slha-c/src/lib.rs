@@ -44,10 +44,7 @@ pub unsafe extern "C" fn slha_process_tile(
         0
     });
 
-    match result {
-        Ok(code) => code,
-        Err(_) => -2, // Panic occurred
-    }
+    result.unwrap_or(-2) // -2 if panic occurred
 }
 
 /// Run the self-audit and return a JSON string.
@@ -62,10 +59,7 @@ pub unsafe extern "C" fn slha_audit() -> *mut i8 {
         std::ffi::CString::new(s).unwrap().into_raw()
     });
 
-    match result {
-        Ok(ptr) => ptr,
-        Err(_) => ptr::null_mut(),
-    }
+    result.unwrap_or(ptr::null_mut())
 }
 
 /// Free a string allocated by the library.

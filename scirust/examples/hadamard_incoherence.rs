@@ -54,7 +54,7 @@ fn fused_spearman(model: &LearnedModel, d: usize, decay: f32) -> (f32, f32, f32)
     for (i, key) in eval.iter().enumerate() {
         s_true.push(dot(q, key));
         let hot = model.encode(key, i as u32, false);
-        let mut warm = hot.clone();
+        let mut warm = hot;
         warm.flags |= FLAG_WARM;
         s_hot.push(hot.compute_score(&qc, &qs));
         s_warm.push(warm.compute_score(&qc, &qs));
