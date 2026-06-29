@@ -21,6 +21,7 @@
 // position reads closer to the math than iterator-chain rewrites would.
 #![allow(clippy::needless_range_loop)]
 
+pub mod adapter;
 pub mod attention;
 pub mod audit;
 pub mod ccos;
