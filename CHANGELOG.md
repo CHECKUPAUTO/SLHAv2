@@ -41,6 +41,51 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
     l'anticipait. Exemple `examples/pre_rope_projection.rs`.
   - +14 tests (incoherence 7, rope 4, learned A1/A2 3) → **60 tests scirust,
     70 workspace**.
+- **Plan d'amélioration — Phase 2 (politique de cache) : axes A4 et A5**,
+  implémentés comme modules *additifs* (la tuile 128 o et les kernels SIMD
+  sont inchangés ; les 70 tests Phase 1 restent verts).
+  - **A5 — Éviction informée (H2O / StreamingLLM / SnapKV)** : nouvelle
+    `ccos::EvictionPolicy` (`Causal` par défaut, back-compatible, ou
+    `Importance { sink_window }`) qui remplace l'éviction purement causale par
+    un ordre d'**importance** : éviction des tuiles de plus faible masse
+    d'attention cumulée (H2O), avec **pinnage des attention sinks** (les
+    `sink_window` premiers jetons, par position — StreamingLLM). L'importance
+    est accumulée par `ElasticKvCache::observe_scores` (softmax de l'attention
+    sur les tuiles live, à chaque pas de décodage). `σ_E` garde son rôle dans
+    la phase de *paging* (HOT→WARM via `PageOutPolicy`) — seule la phase
+    d'*éviction* change. **Mesuré** (`examples/informed_eviction.rs`, scénario
+    construit heavy-hitters + sinks) : sous pression (16/64 tuiles gardées),
+    le cosinus de la sortie d'attention passe de **0,13 (Causal) à 0,53
+    (Importance)** (+0,41) — l'éviction causale droppait les heavy-hitters
+    mi-séquence ET les sinks. Le scénario est construit pour exhiber le
+    mécanisme ; la magnitude sur vrai LLM est l'axe A7 / Phase 3, le *signe*
+    est ce que la mesure confirme. +3 tests ccos (éviction informée + sinks,
+    accumulation H2O, et `sink_window = 0` = H2O pur sans pinning).
+  - **A4 — Résidu multi-bit / multi-round (QINCo / Reformer)** à **budget
+    256 bits fixé** (l'invariant tuile 128 o tient : on ne change que la façon
+    de *dépenser* les 256 bits du résidu). Nouveau module `scirust::residual` :
+    `BinaryResidual` (1-bit généralisé), `QuantResidual` (`b`-bit, `D_S/b`
+    hyperplans, quantificateur uniforme centré calibré par σ_E),
+    `MultiRoundResidual` (`K` hashes 1-bit de `D_S/K` bits, moyenne). **Mesuré
+    (robuste sur 18 combos decay×seed — 3 decays × 6 seeds)** : le multi-bit
+    réduit l'**erreur relative L2** (`rel_l2 = ‖est−true‖/‖true‖`, *pas* une MSE)
+    de l'estimateur du résidu d'un facteur **> ~3,3× (garanti par le test sur les
+    18 combos)** — typique ~×4, jusqu'à **×200+ à haut-ρ (×245 mesuré au pic)**
+    où le sign 1-bit sature — c'est le levier confirmé du plan (« meilleur HOT à
+    rho élevé »), un gain de *magnitude*. **Honnêtement** : le gain de *rang*
+    (Spearman) n'est **pas robuste** — le 1-bit×256 (plus d'hyperplans) échantillonne
+    mieux la direction, et le multi-bit s'effondre sur certaines seeds (jusqu'à
+    négatif) : trade-off magnitude vs direction, pas une domination. La
+    graduation Soft-Paging HOT2 (`b`-bit) → HOT1 (MSB = sign 1-bit) → WARM est
+    un masquage de bits des mêmes 32 o (O(1), intégration Phase 3). Exemple
+    `examples/multibit_residual.rs`. +11 tests residual (budget fixe, rang 1-/2-/8-bit,
+    équivalence kernel tuile, **padding du mot de queue** (n_bits non multiple de 64),
+    **niveau le plus proche du quantificateur + conservation du signe à bits=1**
+    (pin du bug half-step : `floor` pas `round` sur grille centrée), **k=1 ≡
+    BinaryResidual(D_S) bit-pour-bit**, **k=3 rejeté (panic)**, réduction robuste
+    sur 18 combos).
+  - +14 tests (A4 : 11 residual, A5 : 3 ccos) → **74 tests scirust, 81 workspace**
+    (hors doctests ; +3 doctests scirust).
 - **Serveur MCP `slha-mcp`** (nouveau crate du workspace, **zéro dépendance
   externe** — réutilise `scirust::json`) : serveur Model Context Protocol sur
   **stdio** (JSON-RPC 2.0 délimité par lignes) qui expose le noyau et l'auto-audit

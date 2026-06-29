@@ -32,10 +32,9 @@ pub enum TileState {
 /// Order in which HOT tiles are paged out (HOT→WARM) under memory pressure.
 ///
 /// Note this only governs the **paging** phase. Eviction (WARM/HOT→COLD), which
-/// only kicks in once paging the whole working set is not enough, is **always**
-/// causal (oldest-inserted first) — dropping a token entirely is a harder loss
-/// than freeing its residual, so it should hit the most causally-distant context
-/// regardless of `σ_E`.
+/// only kicks in once paging the whole working set is not enough, is governed by
+/// a separate [`EvictionPolicy`] — dropping a token entirely is a harder loss
+/// than freeing its residual, so the two phases use different criteria.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum PageOutPolicy {
     /// **Hybrid (recommended, default).** Page out the lowest-`σ_E` tiles first
@@ -50,14 +49,45 @@ pub enum PageOutPolicy {
     OldestFirst,
 }
 
+/// Order in which live tiles are evicted (→COLD) once paging the whole working
+/// set to WARM is not enough (plan axis **A5** — informed eviction).
+///
+/// `σ_E` already governs the *paging* phase via [`PageOutPolicy`] (free the
+/// residual where it hurts least); this policy governs the harsher *eviction*
+/// phase (drop the token entirely). Pure-causal eviction ignores how much
+/// attention a token actually receives and destroys heavy-hitters / attention
+/// sinks. The informed alternative preserves them.
+///
+/// See: H2O (arXiv 2306.14048), StreamingLLM (2309.17453), SnapKV (2404.14469),
+/// PyramidKV (2406.02069), FastGen (2310.01801).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum EvictionPolicy {
+    /// **Causal (default, back-compatible).** Evict the oldest-inserted live
+    /// tiles first (causal distance, §4). This is the original SLHA v2 policy.
+    #[default]
+    Causal,
+    /// **Informed eviction (plan axis A5).** Evict the lowest-importance live
+    /// tiles first, but **never the attention sinks** — the first
+    /// `sink_window` tokens (by `position`, cf. StreamingLLM) are pinned and
+    /// dropped only when nothing else remains. Importance is the **cumulative
+    /// attention mass** each token has received (H2O), recorded via
+    /// [`ElasticKvCache::observe_scores`] across decoding steps. `σ_E` stays a
+    /// complementary signal through the paging phase, untouched here.
+    Importance { sink_window: usize },
+}
+
 /// Elastic KV-cache over a contiguous arena of [`SciRustSlhaTile`].
 pub struct ElasticKvCache {
     tiles: Vec<SciRustSlhaTile>,
     state: Vec<TileState>,
     seq: Vec<u64>, // insertion order (paging tie-break + eviction), survives reuse
+    /// Cumulative attention mass per slot (H2O importance, plan axis A5).
+    /// Reset on (re)insert; only read by [`EvictionPolicy::Importance`].
+    importance: Vec<f32>,
     free: Vec<usize>,
     budget_bytes: usize,
     policy: PageOutPolicy,
+    eviction: EvictionPolicy,
     next_seq: u64,
 }
 
@@ -67,9 +97,11 @@ impl ElasticKvCache {
             tiles: Vec::new(),
             state: Vec::new(),
             seq: Vec::new(),
+            importance: Vec::new(),
             free: Vec::new(),
             budget_bytes,
             policy,
+            eviction: EvictionPolicy::default(),
             next_seq: 0,
         }
     }
@@ -80,22 +112,76 @@ impl ElasticKvCache {
         Self::new(budget_bytes, PageOutPolicy::default())
     }
 
+    /// As [`Self::with_budget`] but with an explicit eviction policy (plan axis
+    /// A5). Use [`EvictionPolicy::Importance`] to preserve heavy-hitters and
+    /// attention sinks under pressure instead of dropping oldest-first.
+    pub fn with_eviction(budget_bytes: usize, eviction: EvictionPolicy) -> Self {
+        let mut c = Self::with_budget(budget_bytes);
+        c.eviction = eviction;
+        c
+    }
+
     /// Insert a HOT tile, reusing a recycled (COLD) slot when available. Returns
-    /// the slot id.
+    /// the slot id. The slot's H2O importance is (re)set to 0.
     pub fn insert(&mut self, tile: SciRustSlhaTile) -> usize {
         let slot = if let Some(s) = self.free.pop() {
             self.tiles[s] = tile;
             self.state[s] = TileState::Hot;
             self.seq[s] = self.next_seq;
+            self.importance[s] = 0.0;
             s
         } else {
             self.tiles.push(tile);
             self.state.push(TileState::Hot);
             self.seq.push(self.next_seq);
+            self.importance.push(0.0);
             self.tiles.len() - 1
         };
         self.next_seq += 1;
         slot
+    }
+
+    /// Cumulative attention mass (H2O importance, plan axis A5) accumulated on
+    /// `slot` via [`Self::observe_scores`]. Zero for a freshly inserted slot.
+    pub fn importance(&self, slot: usize) -> f32 {
+        self.importance[slot]
+    }
+
+    /// H2O-style importance accumulation (plan axis A5): add the softmax
+    /// attention mass of `scores` (raw logits, divided by `temperature`) to each
+    /// referenced live slot's cumulative importance. Tokens that consistently
+    /// attract attention become the heavy-hitters the
+    /// [`EvictionPolicy::Importance`] policy preserves.
+    ///
+    /// `scores` is typically the output of [`Self::score_all`]; cold slots it
+    /// references are skipped (they carry no attention once evicted).
+    pub fn observe_scores(&mut self, scores: &[(usize, f32)], temperature: f32) {
+        if scores.is_empty() {
+            return;
+        }
+        let m = scores
+            .iter()
+            .map(|&(_, s)| s)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let mut sum = 0.0f32;
+        let mut w = vec![0.0f32; scores.len()];
+        for (i, &(_, s)) in scores.iter().enumerate() {
+            w[i] = ((s - m) / temperature).exp();
+            sum += w[i];
+        }
+        // Guard against degenerate inputs that would otherwise write NaN into
+        // the importance vector: all-(-inf) scores give `m = -inf` ⇒ `s - m` =
+        // NaN; a zero temperature divides by 0 ⇒ inf/NaN. Treat both (and the
+        // empty-mass case) as a safe no-op rather than corrupting `importance`.
+        if !sum.is_finite() || sum <= 0.0 {
+            return;
+        }
+        let inv = 1.0 / sum;
+        for (i, &(slot, _)) in scores.iter().enumerate() {
+            if slot < self.importance.len() && self.state[slot] != TileState::Cold {
+                self.importance[slot] += w[i] * inv;
+            }
+        }
     }
 
     /// Fused attention score for a (non-COLD) slot. WARM slots return the coarse
@@ -168,9 +254,10 @@ impl ElasticKvCache {
     ///
     /// 1. **Page** HOT→WARM in [`PageOutPolicy`] order (default hybrid: lowest
     ///    `σ_E` first — free the residual where it hurts least).
-    /// 2. If still over budget, **evict** live tiles →COLD, **always oldest
-    ///    first** (causal distance) — dropping a token is the harder loss, so it
-    ///    targets the most distant context regardless of `σ_E`.
+    /// 2. If still over budget, **evict** live tiles →COLD per
+    ///    [`EvictionPolicy`]: default `Causal` (oldest first), or `Importance`
+    ///    (plan axis A5: lowest cumulative attention first, attention sinks
+    ///    pinned) — dropping a token is the harder loss.
     pub fn enforce_budget(&mut self) {
         if self.live_bytes() <= self.budget_bytes {
             return;
@@ -195,11 +282,30 @@ impl ElasticKvCache {
             self.page_out(s);
         }
 
-        // Still over budget: evict oldest live tiles entirely.
+        // Still over budget: evict live tiles per the eviction policy.
         let mut live: Vec<usize> = (0..self.tiles.len())
             .filter(|&s| self.state[s] != TileState::Cold)
             .collect();
-        live.sort_by_key(|&s| self.seq[s]);
+        match self.eviction {
+            EvictionPolicy::Causal => live.sort_by_key(|&s| self.seq[s]),
+            EvictionPolicy::Importance { sink_window } => {
+                let sw = sink_window as u32;
+                // Sinks (position < sink_window) sort LAST (evicted only when
+                // nothing else remains); among the rest, lowest H2O importance
+                // first; ties broken oldest-first (causal stability).
+                live.sort_by(|&a, &b| {
+                    let sa = self.tiles[a].position < sw;
+                    let sb = self.tiles[b].position < sw;
+                    sa.cmp(&sb)
+                        .then_with(|| {
+                            self.importance[a]
+                                .partial_cmp(&self.importance[b])
+                                .unwrap_or(core::cmp::Ordering::Equal)
+                        })
+                        .then_with(|| self.seq[a].cmp(&self.seq[b]))
+                });
+            }
+        }
         for s in live {
             if self.live_bytes() <= self.budget_bytes {
                 return;
