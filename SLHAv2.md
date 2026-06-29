@@ -443,6 +443,44 @@ Le latent peut être encodé en **NF4** (codebook NormalFloat-4, 16 niveaux aux 
 
 **Figer.** La forme est **figée** (validée) ; la constante calibrée est **documentée et épinglée par test** (`lambda_calibration_is_stable_and_pinned`). Le crate **garde la formule analytique par défaut** : le facteur 4,2 est mesuré sur données *synthétiques* à projections aléatoires, et l'optimum réel dépend du modèle (cf. §7.8). `calibrate_lambda` re-dérive `C` par déploiement ; `C ≈ 0,33` est la valeur recommandée une fois validée sur modèle réel.
 
+### 7.10 Plan d'amélioration — Phase 1 (axes A1, A2)
+
+Le plan d'amélioration complet (12 axes, roadmap) est dans
+`docs/SLHAv2_schema_plan.pdf`. Les deux axes critiques de la **Phase 1
+(fidélité)** sont implémentés comme modules **additifs** — la tuile 128 o et
+les kernels SIMD sont inchangés, les tests historiques restent verts.
+
+**A2 — Incohérence Hadamard (QuIP#/Palu) sur le résidu sign-LSH.** Nouveau
+module `scirust::incoherence` (FWHT orthonormée O(d·log d) + transformée
+randomisée `H·D`, diagonale ±1), câblée en **opt-in** dans `LearnedModel`
+(`fit_with`/`from_projection_with(..., rht = true)`). La RHT est appliquée au
+résidu `E` et à la requête `Q` avant le sign-LSH ; **orthogonale ⇒
+`⟨RHT·E, RHT·Q⟩ = ⟨E, Q⟩`**, le score fusionné est préservé, seul le résidu
+1-bit gagne en résolution. **Mesuré** (`examples/hadamard_incoherence.rs`) :
+dans le régime « outlier aveuglant » (direction forte commune + signal unique
+structuré — le cas QuIP#), le **cœur binaire** passe de Spearman **0,07 à 0,49
+(+0,42)** ; **WARM est préservé bit-exact** (ΔWARM = 0,0000) car la RHT
+n'atteint jamais le chemin coarse. **Honnêtement** : sur résidu bien
+conditionné, la RHT est neutre à nuisible pour HOT → A2 est *opt-in
+conditionnel* (activer si le rapport peak/mean du résidu est élevé), **pas un
+défaut**. Cible directe du §7.1 (résidu 0,67 sur directions quasi-orthogonales).
+
+**A1 — Projection bas-rang sur clés PRE-RoPE (ShadowKV).** Nouveau module
+`scirust::rope` (rotation RoPE standard par paires, orthogonale, testée) et
+API publique `learned::captured_energy_at(train, d, rank)`. **Mesuré
+(robuste sur plusieurs seeds)** : RoPE détruit le bas-rang des clés — énergie
+captée chute de **~99,5 % à ~92 %** à rang 128 (Δ +7 %), et de **99 % à 68 %**
+à rang 32 (Δ +30 %). C'est la **racine mesurée du goulot « projection » du
+§7.8**, exactement le mécanisme que ShadowKV (arXiv 2410.21465) identifie.
+**Honnêtement** : sur ce factor model synthétique, la levée du *Spearman WARM*
+n'est **pas robuste** (légèrement négative, 0/5 seeds) — la queue perdue touche
+la magnitude plus que le ranking, et l'erreur de reconstruction pre-RoPE
+(rotée par de grands angles) peut manger le gain. Une levée robuste du
+plafond WARM nécessite les clés d'un **vrai LLM** (queue lourde, long contexte,
+objectif perplexité) — intégration **Phase 3 / A7**, comme le plan
+l'anticipait en qualifiant A1 de gain sur vrai modèle. Voir
+`examples/pre_rope_projection.rs`.
+
 **Conclusion partielle.** Le mécanisme est **mathématiquement correct** (tests, dont les équivalences scalaire/AVX2) et **directionnellement validé** : HOT ≥ WARM, Soft-Paging quasi sans perte à faible `rho`, SIMD ×13, **~2,5× de tokens/s vs bf16** (§7.5), **sortie d'attention à cosinus 0,95–0,997** (§7.6), **projection apprise > PCA** sous décalage Q/K (§7.7), et **λ calibrée** (forme `∝σ_E` validée, constante corrigée ~4,2× → `C_emp ≈ 0,33`, §7.9). Le §7.8 corrige une idée reçue : le plafond du *score coarse* tient à la **projection bas-rang**, non à la quantification. Leviers réels : **meilleure projection** et **résidu 1-bit** (correctement pondéré une fois `λ` calibrée) ; pistes restantes : `d_s` plus grand et entraînement conjoint avec un vrai modèle.
 
 ---

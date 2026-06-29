@@ -6,6 +6,41 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
 ## [Unreleased]
 
 ### Added
+- **Plan d'amélioration — Phase 1 (fidélité) : axes A1 et A2** implémentés
+  comme modules *additifs* (aucun changement à la tuile 128 o ni aux kernels
+  SIMD ; les 51 tests historiques restent verts). Voir
+  `docs/SLHAv2_schema_plan.pdf` pour le plan complet.
+  - **A2 — Incohérence Hadamard (QuIP#/Palu)** sur le résidu sign-LSH :
+    nouveau module `scirust::incoherence` (FWHT orthonormée O(d·log d) +
+    transformée randomisée `H·D` diagonale ±1). Câblage **opt-in** dans
+    `LearnedModel` (`fit_with`/`from_projection_with(..., rht: bool)`) : la
+    RHT est appliquée au résidu `E` et à la requête `Q` avant le sign-LSH.
+    **Orthogonale ⇒ `⟨RHT·E, RHT·Q⟩ = ⟨E, Q⟩`** : le score fusionné est
+    préservé, seul le résidu 1-bit gagne en résolution. **Mesuré** : dans le
+    régime « outlier aveuglant » (direction forte commune + signal unique
+    structuré — le cas QuIP#), le cœur binaire passe de Spearman 0,07 à 0,49
+    (**+0,42**) ; **WARM est préservé bit-exact** (ΔWARM = 0,0000) car la RHT
+    n'atteint jamais le chemin coarse. **Honnêtement** : sur résidu bien
+    conditionné, la RHT est neutre à nuisible pour HOT → A2 est *opt-in
+    conditionnel* (activer si peak/mean du résidu est élevé), pas un défaut.
+    Exemple `examples/hadamard_incoherence.rs`.
+  - **A1 — Projection bas-rang sur clés PRE-RoPE (ShadowKV)** : nouveau
+    module `scirust::rope` (rotation RoPE standard par paires de canaux,
+    orthogonale, testée). Nouvelle API publique
+    `learned::captured_energy_at(train, d, rank)` (énergie captée par un PCA
+    de rang k — pour sonder le spectre). **Mesuré (robuste sur 4 seeds)** :
+    RoPE détruit le bas-rang des clés — énergie captée chute de ~99,5 % à
+    ~92 % à rang 128 (Δ +7 %), et de 99 % à 68 % à rang 32 (Δ +30 %). C'est
+    la racine mesurée du goulot « projection » du §7.8, exactement le
+    mécanisme ShadowKV. **Honnêtement** : sur ce factor model synthétique, la
+    levée du *Spearman WARM* n'est pas robuste (légèrement négative, 0/5
+    seeds) — la queue perdue touche la magnitude plus que le ranking, et
+    l'erreur de reconstruction pre-RoPE (rotée) peut manger le gain. Une
+    levée robuste du plafond WARM nécessite les clés d'un vrai LLM (queue
+    lourde, perplexité) — intégration Phase 3 / A7, comme le plan
+    l'anticipait. Exemple `examples/pre_rope_projection.rs`.
+  - +14 tests (incoherence 7, rope 4, learned A1/A2 3) → **60 tests scirust,
+    70 workspace**.
 - **Serveur MCP `slha-mcp`** (nouveau crate du workspace, **zéro dépendance
   externe** — réutilise `scirust::json`) : serveur Model Context Protocol sur
   **stdio** (JSON-RPC 2.0 délimité par lignes) qui expose le noyau et l'auto-audit
