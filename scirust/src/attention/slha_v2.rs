@@ -322,7 +322,7 @@ impl SciRustSlhaTile {
     /// Uses `std::arch::aarch64` NEON intrinsics; sound on any aarch64 CPU.
     #[cfg(target_arch = "aarch64")]
     #[target_feature(enable = "neon")]
-    unsafe fn compute_score_neon(
+    pub unsafe fn compute_score_neon(
         &self,
         q_coarse: &[f32; D_C],
         q_sign: &[u64; RESIDUAL_WORDS],

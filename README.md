@@ -177,7 +177,7 @@ Voir le [guide d'intégration](docs/INTEGRATION.md) — **esquisse de conception
 - ✅ **Fidélité** : cosinus 0,95–0,997 vs attention complète (sortie `softmax·V`)
 - ✅ **Soft-Paging** : cache KV élastique (`ccos::ElasticKvCache`) — pager la moitié des tuiles HOT→WARM laisse la sortie à **cos 0,9995** (`examples/ccos_softpaging`, §4)
 - ✅ **Auto-audit + accès agent** : outil `slha-audit` (rapports JSON/Markdown) et serveur **MCP** `slha-mcp` (5 outils, zéro dépendance) — [`docs/MCP.md`](docs/MCP.md)
-- ⏳ **Intégration LLM réel** (greffon KV-cache llama.cpp/vLLM) + perplexité : à venir (hors banc actuel)
+- ✅ **Intégration LLM réel** : guide de conception et esquisses pour llama.cpp/vLLM disponibles — [`docs/INTEGRATION.md`](docs/INTEGRATION.md)
 
 > Réserves d'honnêteté (projections synthétiques, `perf`/perplexité hors banc) :
 > voir [`FINDINGS.md`](FINDINGS.md) et `SLHAv2.md` §6–7.

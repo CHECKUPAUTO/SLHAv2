@@ -22,9 +22,9 @@ jobs:
       - name: Tests (unit + integration + property/fuzz + doctests)
         run: cargo test --workspace
       - name: Docs (warnings = errors)
-        run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
       - name: Self-audit (slha-audit end-to-end)
         run: cargo run --bin slha-audit -- --json
       - name: Benchmarks compile
