@@ -29,6 +29,7 @@ pub mod json;
 pub mod learned;
 pub mod linalg;
 pub mod metrics;
+pub mod residual;
 pub mod rng;
 pub mod rope;
 pub mod scenario;

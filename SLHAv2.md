@@ -481,6 +481,49 @@ objectif perplexité) — intégration **Phase 3 / A7**, comme le plan
 l'anticipait en qualifiant A1 de gain sur vrai modèle. Voir
 `examples/pre_rope_projection.rs`.
 
+### 7.11 Plan d'amélioration — Phase 2 (axes A5, A4)
+
+Les deux axes **Haute** priorité de la **Phase 2 (politique de cache)** sont
+implémentés comme modules **additifs** — la tuile 128 o et les kernels SIMD
+sont inchangés, les 70 tests Phase 1 restent verts.
+
+**A5 — Éviction informée (H2O / StreamingLLM / SnapKV).** L'éviction §4 est
+purement causale (plus ancien d'abord) ; or l'attention a des **heavy-hitters**
+et des **attention sinks** (les premiers jetons, que toute requête attende —
+StreamingLLM) que l'éviction par âge détruit. Nouvelle `ccos::EvictionPolicy`
+(`Causal` par défaut, back-compatible, ou `Importance { sink_window }`) : éviction
+des tuiles de **plus faible masse d'attention cumulée** (H2O, accumulée par
+`ElasticKvCache::observe_scores` à chaque pas de décodage), avec **pinnage des
+sinks** (les `sink_window` premiers jetons, par position). `σ_E` garde son rôle
+dans la phase de *paging* (HOT→WARM via `PageOutPolicy`) — seule la phase
+d'*éviction* change. **Mesuré** (`examples/informed_eviction.rs`, scénario
+construit heavy-hitters mi-séquence + sinks pinnés, budget 16/64 tuiles) : le
+cosinus de la sortie d'attention passe de **0,13 (Causal) à 0,53 (Importance)**
+(+0,41) — l'éviction causale droppait les heavy-hitters ET les sinks ; informée
+les préserve. **Honnêtement** : le scénario est construit pour exhiber le
+mécanisme (exactement la structure rapportée par H2O/StreamingLLM) ; la
+*magnitude* sur un vrai LLM (long contexte, perplexité) est l'axe A7 / Phase 3,
+le *signe* — informée dégrade plus gracieusement — est ce que la mesure confirme.
+
+**A4 — Résidu multi-bit / multi-round (QINCo / Reformer) à budget 256 bits
+fixé.** L'invariant tuile 128 o tient : on ne change que la façon de *dépenser*
+les 256 bits du résidu. Nouveau module `scirust::residual` : `BinaryResidual`
+(1-bit généralisé), `QuantResidual` (`b`-bit, `D_S/b` hyperplans, quantificateur
+uniforme centré calibré par σ_E), `MultiRoundResidual` (`K` hashes 1-bit de
+`D_S/K` bits, moyenne — Reformer). **Mesuré (robuste sur 18 combos
+decay×seed — 3 decays × 6 seeds)** : le multi-bit réduit l'**erreur relative L2**
+(`rel_l2 = ‖est−true‖/‖true‖`, *pas* une MSE) de l'estimateur du résidu d'un
+facteur **> ~3,3× (garanti par le test sur les 18 combos)** — typique ~×4,
+jusqu'à **×200+ à haut-ρ (×245 mesuré au pic)** où le sign 1-bit sature — le levier
+confirmé du plan (« meilleur HOT à rho élevé »), un gain de **magnitude**.
+**Honnêtement** : le gain de *rang* (Spearman) n'est **pas robuste** — le
+1-bit×256 (plus d'hyperplans) échantillonne mieux la direction, et le multi-bit
+s'effondre sur certaines seeds (jusqu'à négatif) : trade-off magnitude vs
+direction, pas une domination. La graduation Soft-Paging **HOT2** (`b`-bit) →
+**HOT1** (MSB = sign 1-bit) → **WARM** est un masquage de bits des mêmes 32 o
+(O(1), invariant tuile préservé ; le kernel lit le MSB seul en HOT1 —
+intégration Phase 3). Voir `examples/multibit_residual.rs`.
+
 **Conclusion partielle.** Le mécanisme est **mathématiquement correct** (tests, dont les équivalences scalaire/AVX2) et **directionnellement validé** : HOT ≥ WARM, Soft-Paging quasi sans perte à faible `rho`, SIMD ×13, **~2,5× de tokens/s vs bf16** (§7.5), **sortie d'attention à cosinus 0,95–0,997** (§7.6), **projection apprise > PCA** sous décalage Q/K (§7.7), et **λ calibrée** (forme `∝σ_E` validée, constante corrigée ~4,2× → `C_emp ≈ 0,33`, §7.9). Le §7.8 corrige une idée reçue : le plafond du *score coarse* tient à la **projection bas-rang**, non à la quantification. Leviers réels : **meilleure projection** et **résidu 1-bit** (correctement pondéré une fois `λ` calibrée) ; pistes restantes : `d_s` plus grand et entraînement conjoint avec un vrai modèle.
 
 ---
