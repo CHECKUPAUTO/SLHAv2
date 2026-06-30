@@ -385,6 +385,8 @@ Toutes les lignes de cache de l'appareil sont à **64 o** (L1d/L1i/L2 ; le « 12
 - **Le débit décroît quand le contexte grandit** (42→30 M/s pour SLHA) : effet de cache visible *indirectement*, l'empreinte plus petite de SLHA la gardant résidente plus longtemps.
 - **Honnêteté :** le LLC fait 260 Mo sur ce banc — on **ne sature pas la DRAM** (GB/s mesurés ≪ pic DRAM) ; le gain vient du volume d'octets et des uops, pas d'une limite DRAM atteinte. Les **compteurs de cache matériels (§6.1) sont indisponibles** ici (`perf` absent, `perf_event_paranoid = 2`). Sur un LLC plus petit, ou en décodage réellement DRAM-bound, l'avantage de SLHA serait plus marqué.
 
+**Proxy de décodage bout-en-bout (`examples/benchmark_decode.rs`).** Au-delà du score, un exemple enchaîne un cycle de décodage d'attention complet — multi-têtes : scores → softmax → agrégation des valeurs `V` (FP32) — pour estimer un ordre de grandeur en *tokens/s*, vs une référence à clés `f32` non compressées. Sur le banc x86 de dev (32 têtes, contexte 8 192) : **SLHA ≈ 1,6× la référence FP**. C'est un **PROXY** (pas un vrai LLM ni de perplexité) : le `V` est FP32 et identique des deux côtés, donc l'écart vient du kernel de score et de l'empreinte des clés (128 o vs 512 o/token) ; le facteur dépend du matériel (calcul vs bande passante). À confirmer sur un modèle réel (§6.3).
+
 ### 7.6 Fidélité de la *sortie* d'attention (proxy de perplexité, §6.3)
 
 Le ranking des scores (§7.2/7.3) est un proxy ; ce qu'un modèle consomme réellement est la **sortie** d'attention `out = softmax(QKᵀ/√d)·V`. `attention_fidelity` la mesure : cosinus et erreur L2 relative entre la sortie vraie (FP) et la sortie SLHA (base apprise PCA, `d = 256`, `N = 512`, moyenne sur 64 requêtes, `d_v = 64`).

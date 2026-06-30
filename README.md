@@ -87,6 +87,9 @@ cargo run --example basic_usage
 
 # Mesure de performance complète
 cargo run --example measure --release
+
+# Proxy de décodage bout-en-bout (⚠️ PAS un vrai LLM) : tok/s SLHA vs réf f32
+cargo run --example benchmark_decode --release
 ```
 
 Sortie de `basic_usage` :
