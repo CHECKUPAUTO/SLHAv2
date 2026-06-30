@@ -15,32 +15,6 @@ cache-line — l'équivalent d'une ligne de texte par token, au lieu de plusieur
 kilo-octets. Deux lignes de cache de 64 octets, conçues pour rester proches du
 processeur (caches L1/L2/L3) plutôt que de dépendre d'un GPU.
 
-### Ce que vous pouvez faire
-
-- **Compresser** chaque clé d'attention : latent bas-rang INT4 (codecs MX par
-  groupe, INT4 uniforme ou NF4) + résidu de correction 1-bit (sign-LSH), le tout
-  dans une tuile de 128 o (`512 o FP32 → 128 o`, facteur ×4).
-- **Scorer** vite : score hybride (produit scalaire continu + `popcount`
-  binaire), avec dispatch SIMD à l'exécution — **AVX2 / AVX-512** sur x86_64,
-  **NEON** sur aarch64, et **repli scalaire portable** partout ailleurs. Chaque
-  chemin SIMD est **vérifié équivalent au scalaire** par test (à 1e-3 près —
-  FMA / accumulation réordonnée ; le sous-terme `popcount`, lui, est exact).
-- **Piloter la mémoire sous budget** : cache KV élastique CCOS (Soft-Paging) qui
-  bascule les tuiles entre les états HOT / WARM / COLD selon l'énergie résiduelle
-  et l'ancienneté.
-- **Auditer** : le binaire `slha-audit` vérifie à l'exécution le layout des
-  tuiles, l'équivalence SIMD / scalaire, la fidélité de sortie, l'invariant de
-  budget CCOS et le déterminisme — rapport Markdown ou JSON, avec diff de
-  régression (`--diff`).
-- **Brancher un agent** : le serveur **MCP** `slha-mcp` (stdio, JSON-RPC 2.0)
-  expose 5 outils — `slha.audit`, `slha.explain`, `slha.compress`, `slha.score`,
-  `slha.benchmark` — appelables depuis tout client MCP (Claude Code / Desktop).
-
-### Pourquoi ça change la donne
-**SLHA v2** compresse la mémoire des IA conversationnelles pour qu'elles tiennent
-dans le cache de votre processeur, et pas seulement dans une carte graphique
-hors de prix.
-
 > **Concrètement (projection) :** en compressant le KV-cache, un LLM qui
 > nécessite ~8 Go de VRAM pourrait tenir sur un CPU avec ~4 Go de RAM. C'est
 > l'objectif du projet — **à valider sur un modèle réel** : aucune mesure de bout
@@ -63,24 +37,26 @@ d'une ligne de texte — au lieu de plusieurs kilo-octets normalement.
 | Obligé d'avoir un GPU | Fonctionne sur CPU |
 | RAM saturée rapidement | Cache L1/L2/L3 utilisé intelligemment |
 
-### Des fondations vérifiables
-
-**58 tests** au total (51 `scirust` + 7 `slha-mcp`), `clippy -D warnings`,
-`cargo doc` propre (warnings = erreurs), MSRV **Rust 1.89**, double licence
-**MIT OR Apache-2.0**, et `cargo publish -p scirust --dry-run` qui passe sans
-avertissement. Les accélérations SIMD sont mesurées à titre indicatif (banc
-partagé, dépendantes du matériel), pas annoncées comme des garanties.
-
-### Périmètre
-
-Workspace Cargo de deux crates **zéro-dépendance externe** (v0.2.0) :
-**`scirust`** (noyau de référence, qui fournit aussi le binaire `slha-audit`) et
-**`slha-mcp`** (serveur MCP, qui réutilise `scirust::json`). Importé comme
-bibliothèque, le noyau n'ajoute **rien** à votre arbre de dépendances.
 > ¹ *Projection* par tuile de 128 o/token (basée sur une clé non compressée
 > ~15,6 ko/token). Le ratio **mesuré** au niveau kernel est 128 o vs 256 o pour
 > une clé bf16 = **2× moins d'octets/token** (§7.5) ; le facteur de bout en bout
 > sur un LLM réel reste à mesurer.
+
+## Le projet en bref — ce que vous pouvez faire
+
+SLHA v2 est un **workspace Cargo de 4 crates** (tous en v0.2.0), organisé autour d'un noyau de référence et de ponts vers l'extérieur. Concrètement, avec ce dépôt vous pouvez :
+
+- **Compresser** chaque souvenir de KV-cache en une **tuile de 128 octets** sans padding (latent INT4 bas-rang 64 o + résidu 1-bit 32 o + métadonnées 32 o), et **scorer** une requête contre cette tuile sans la décompresser : produit scalaire sur le latent + popcount/Hamming sur le résidu (`compute_score`, eq. 2.3).
+- **Piloter le cache mémoire** avec **CCOS** (`ccos::ElasticKvCache`), un cache KV élastique « Soft-Paging » sur arène contiguë (états HOT 128 o / WARM 96 o, résidu masqué + λ=0 / COLD évincé) qui borne l'empreinte sous un budget en octets que vous fixez (`enforce_budget`), avec politiques de pagination (σ_E / ancienneté) et d'éviction (Causal par défaut, ou Importance H2O/StreamingLLM).
+- **Filtrer la sécurité directement sur le latent compressé** : le module **`safety`** (`LatentSafetyGuard`) détecte injection et dérive **avant** décompression — déviation angulaire (cosinus), isolation orthogonale (classifieur linéaire optionnel), dérive glissante (fenêtre de 4). ~200 cycles/tuile, zéro allocation, safe Rust portable. Module **additif** : il n'altère ni la tuile 128 o ni les kernels SIMD.
+- **Aligner et placer la mémoire** (module `numa`, *additif*) : `AlignedBuffer` (allocation alignée portable, zéro dépendance, disponible par défaut partout) ; en option la feature **`numa`** (Linux, `libc` en dépendance optionnelle) ajoute placement **NUMA** (`mmap`/`mbind` best-effort), épinglage de thread (`sched_setaffinity`) et introspection sysfs, avec repli gracieux ailleurs (`NumaError::Unavailable`).
+- **Auditer** votre build avec le binaire **`slha-audit`** : layout de tuile (128 o, zéro padding, alignement), équivalence SIMD ≡ scalaire vérifiée à l'exécution, features CPU et niveaux de cache, fidélité vs attention complète, invariant de budget CCOS, déterminisme. Rapports Markdown ou JSON (`--json`/`--pretty`/`--out`), diff de régression (`--diff PRIOR.json`), sortie ≠ 0 en cas d'échec.
+- **Brancher un agent** via le serveur **MCP** `slha-mcp` (stdio, JSON-RPC 2.0 délimité par lignes, **zéro dépendance externe** — réutilise `scirust::json`), qui expose 5 outils : `slha.audit`, `slha.explain`, `slha.compress`, `slha.score`, `slha.benchmark`.
+- **Appeler le noyau depuis d'autres langages** grâce aux bindings **C** (`slha-c`, interface ABI C `cdylib`/`staticlib` + en-tête `slha.h`) et **Python** (`slha-python`, module natif via PyO3).
+
+Le noyau **`scirust`** est à **zéro dépendance externe par défaut** (build offline), avec dispatch SIMD choisi **à l'exécution** (AVX-512 > AVX2 > scalaire sur x86_64, NEON sur aarch64 ; repli scalaire portable, aucun gating à la compilation). L'équivalence SIMD ≡ scalaire du score est garantie **à 1e-3 près** (FMA / accumulation réordonnée, pas bit-pour-bit) ; seul le popcount/Hamming est exact bit-à-bit. Le noyau embarque aussi les modules `safety`, `numa`, `incoherence` (RHT de Hadamard opt-in), `rope`, `residual`, `adapter`, `ccos`, `audit` et `json`, et fournit le binaire `slha-audit`. Les ratios SIMD sont **indicatifs** et dépendent de votre matériel — mesurez les vôtres avec `cargo run --example cycles --release`.
+
+> **Licence :** double licence — **PolyForm Noncommercial 1.0.0** (usage non-commercial et personnel, gratuit) ; **licence commerciale** requise pour tout usage commercial (voir `LICENSE.md`).
 
 > Le dépôt est un **workspace Cargo** : toutes les commandes ci-dessous se
 > lancent depuis la racine.
