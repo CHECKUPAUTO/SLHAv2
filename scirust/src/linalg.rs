@@ -20,11 +20,12 @@ pub fn jacobi_eigh(a_in: &[f32], n: usize) -> (Vec<f64>, Vec<f64>) {
 
     const MAX_SWEEPS: usize = 100;
     for _ in 0..MAX_SWEEPS {
-        // Off-diagonal Frobenius norm (squared).
+        // Off-diagonal Frobenius norm (squared). Only upper triangle as A is symmetric.
         let mut off = 0.0f64;
         for p in 0..n {
-            for q in (p + 1)..n {
-                off += a[p * n + q] * a[p * n + q];
+            let row = &a[p * n + (p + 1)..p * n + n];
+            for &val in row {
+                off += val * val;
             }
         }
         if off <= 1e-20 {

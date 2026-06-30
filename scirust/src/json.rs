@@ -143,6 +143,7 @@ impl Json {
         let mut p = Parser {
             b: input.as_bytes(),
             i: 0,
+            depth: 0,
         };
         p.ws();
         let v = p.value()?;
@@ -184,7 +185,10 @@ fn write_escaped(out: &mut String, s: &str) {
 struct Parser<'a> {
     b: &'a [u8],
     i: usize,
+    depth: usize,
 }
+
+const MAX_DEPTH: usize = 64;
 
 impl<'a> Parser<'a> {
     fn ws(&mut self) {
@@ -197,9 +201,22 @@ impl<'a> Parser<'a> {
     }
     fn value(&mut self) -> Result<Json, String> {
         self.ws();
+        if self.depth > MAX_DEPTH {
+            return Err("JSON nesting too deep".into());
+        }
         match self.peek() {
-            Some(b'{') => self.object(),
-            Some(b'[') => self.array(),
+            Some(b'{') => {
+                self.depth += 1;
+                let r = self.object();
+                self.depth -= 1;
+                r
+            }
+            Some(b'[') => {
+                self.depth += 1;
+                let r = self.array();
+                self.depth -= 1;
+                r
+            }
             Some(b'"') => Ok(Json::Str(self.string()?)),
             Some(b't') => self.literal("true", Json::Bool(true)),
             Some(b'f') => self.literal("false", Json::Bool(false)),
@@ -428,5 +445,13 @@ mod tests {
         assert!(Json::parse("nul").is_err());
         assert!(Json::parse("\"unterminated").is_err());
         assert!(Json::parse("1 2").is_err());
+    }
+
+    #[test]
+    fn rejects_deep_nesting() {
+        let deep = "[".repeat(100) + &"]".repeat(100);
+        let r = Json::parse(&deep);
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err(), "JSON nesting too deep");
     }
 }
