@@ -5,6 +5,9 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
 
 ## [Unreleased]
 
+_(rien pour l'instant — la prochaine version listera ses changements ici.)_
+
+## [0.2.0] — 2026-06-30
 ### Fixed
 - **Build cassé sur aarch64 (PR#19, `slha-c`)** : `slha_audit`/`slha_free_string`
   déclaraient `*mut i8` alors que `CString::into_raw`/`from_raw` utilisent
