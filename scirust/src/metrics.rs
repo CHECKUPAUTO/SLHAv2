@@ -136,6 +136,17 @@ pub fn softmax_into(scores: &[f32], scale: f32, out: &mut [f32]) {
         *o = e;
         sum += e;
     }
+    // All-(-inf) (or all-masked) inputs give sum == 0; dividing would yield
+    // NaN/Inf. Return a uniform distribution instead, mirroring the
+    // "finite 0.0 on degenerate input" contract of the other helpers.
+    if !sum.is_finite() || sum <= 0.0 {
+        let n = out.len();
+        let u = if n == 0 { 0.0 } else { 1.0 / n as f32 };
+        for o in out.iter_mut() {
+            *o = u;
+        }
+        return;
+    }
     let inv = 1.0 / sum;
     for o in out.iter_mut() {
         *o *= inv;
@@ -162,6 +173,13 @@ mod tests {
 
         let mut out: [f32; 0] = [];
         softmax_into(empty, 1.0, &mut out); // must not panic
+
+        // All-(-inf) scores: must not produce NaN/Inf; uniform output instead.
+        let mut w = [f32::NAN; 4];
+        softmax_into(&[f32::NEG_INFINITY; 4], 1.0, &mut w);
+        assert!(w.iter().all(|&x| x.is_finite()), "got {w:?}");
+        assert!((w.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+        assert!((w[0] - 0.25).abs() < 1e-6);
 
         for v in [
             rms(empty),

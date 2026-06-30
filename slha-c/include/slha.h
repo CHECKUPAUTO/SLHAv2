@@ -17,16 +17,30 @@ extern "C" {
 /**
  * SLHA v2 Tile structure.
  *
- * Alignment: 64 or 128 bytes depending on the platform's cache line.
- * Total size: exactly 128 bytes.
+ * Total size: exactly 128 bytes. Alignment must match the Rust build:
+ *   - 64 bytes by default (all x86_64 and AArch64/Neoverse parts we target),
+ *   - 128 bytes when the Rust crate was built with `cfg(cache_line_128)`
+ *     (hosts with genuine 128-byte data cache lines, e.g. Apple Silicon).
+ * To pair with a 128-byte Rust build, compile the C side with
+ * `-DSLHA_CACHE_LINE_128=1` (or `#define SLHA_CACHE_LINE_128 1` before
+ * including this header). The size is 128 either way (a multiple of both
+ * alignments), so the field layout and offsets are identical regardless.
  */
-#if defined(__GNUC__) || defined(__clang__)
-#define SLHA_ALIGN_64 __attribute__((aligned(64)))
+#if defined(SLHA_CACHE_LINE_128) && SLHA_CACHE_LINE_128
+#  define SLHA_TILE_ALIGN 128
 #else
-#define SLHA_ALIGN_64
+#  define SLHA_TILE_ALIGN 64
 #endif
 
-typedef struct SLHA_ALIGN_64 {
+#if defined(__GNUC__) || defined(__clang__)
+#  define SLHA_ALIGNED(x) __attribute__((aligned(x)))
+#elif defined(_MSC_VER)
+#  define SLHA_ALIGNED(x) __declspec(align(x))
+#else
+#  define SLHA_ALIGNED(x)
+#endif
+
+typedef struct SLHA_ALIGNED(SLHA_TILE_ALIGN) {
     uint8_t latent_kv[SLHA_LATENT_BYTES];
     uint64_t residual_bitmap[SLHA_RESIDUAL_WORDS];
     float scale;

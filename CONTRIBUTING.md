@@ -10,16 +10,22 @@ La CI exige que ces commandes passent — lancez-les en local :
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace          # 58 tests (51 scirust + 7 slha-mcp ; unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS + MCP)
+cargo test --workspace          # 85 tests (78 scirust + 7 slha-mcp ; unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS + MCP)
 cargo build --workspace --all-targets
-cargo bench --workspace --no-run
+cargo bench -p scirust --no-run    # seul `scirust` a des benches ; `--workspace`
+                                  # casserait au link de `slha-python` (pyo3
+                                  # extension-module + LTO → symboles Py_* non
+                                  # résolus en profil release/bench)
 ```
 
 Pour le chemin NEON (ARM), vérifiez la cross-compilation :
 
 ```bash
 rustup target add aarch64-unknown-linux-gnu
-cargo build -p scirust --lib --target aarch64-unknown-linux-gnu
+# Même commande que la CI : scirust (chemin NEON) + slha-c (C-ABI, qui a déjà
+# cassé sur aarch64) + slha-mcp. slha-python (PyO3) est exclu — il nécessite
+# les dev libs Python aarch64.
+cargo build -p scirust -p slha-c -p slha-mcp --lib --target aarch64-unknown-linux-gnu
 ```
 
 ## Principes du projet

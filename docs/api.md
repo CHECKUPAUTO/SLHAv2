@@ -144,8 +144,10 @@ no-op trompeuses — supprimées.) La bibliothèque est **sans dépendance** ;
 indicatifs — ils dépendent du CPU et de l'auto-vectorisation.** Reproductible via
 `cargo run --release -p scirust --example platform_report`.)
 
-- **Mémoire :** tuile 128 o/token contre 256 o pour une clé bf16 → **~2,5×**
-  plus de tokens/s à débit comparable (§7.5).
+- **Mémoire :** tuile 128 o/token contre 256 o pour une clé bf16 → **2× moins
+  d'octets/token**. Sur un banc Xeon AVX2 cela donne **~2,5× tokens/s** au
+  niveau kernel ; sur CPU scalaire le même banc donne ~1,3×. Facteur de bout en
+  bout (decode LLM) non mesuré (§7.5).
 - **Fidélité :** la sortie d'attention (`softmax·V`) reste à **cosinus
   0,95–0,997** vs FP malgré un score approché (§7.6).
 
@@ -182,7 +184,7 @@ Voir aussi `scirust/examples/basic_usage.rs` (exemple exécutable identique).
 ## Build / test / bench (depuis la racine, workspace)
 
 ```sh
-cargo test                 # 51 tests (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS + JSON + audit)
+cargo test                 # 78 tests scirust (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS + JSON + audit)
 cargo bench                # micro-benchs criterion (scalaire / AVX2 / AVX-512)
 cargo run -p scirust --example basic_usage
 cargo run --release -p scirust --example platform_report   # kit x86/ARM : features SIMD, cache, débit
