@@ -12,7 +12,7 @@ pub trait ExternalCacheAdapter {
 /// Blanket implementation for types that can be converted into a tile.
 impl<T> ExternalCacheAdapter for T
 where
-    T: Into<SciRustSlhaTile> + Clone
+    T: Into<SciRustSlhaTile> + Clone,
 {
     fn map_to_tile(&self) -> SciRustSlhaTile {
         self.clone().into()

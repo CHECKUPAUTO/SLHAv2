@@ -257,7 +257,7 @@ Les limitations de la v1 sont **levées** dans le crate `scirust` (`cargo test` 
 - ✅ **`read_volatile` supprimé.** Le chemin chaud lit des `slice`s normaux : LLVM peut de nouveau auto-vectoriser et réordonner. La spécialisation SIMD n'est pas encore écrite, mais elle n'est plus **bloquée**.
 - ✅ **INT4 signé (zero-point).** La déquantification est `(nibble − 8)·scale` : la base bas-rang représente désormais des valeurs négatives. Garanti par le test `int4_dequant_round_trips_signed_values`.
 - ✅ **API sûre, pas de `target_feature` trompeur.** Plus d'`unsafe`, plus d'import mort, plus de gate `avx2` sans intrinsèque ; `count_ones()` se compile en `POPCNT` quand la cible le supporte, avec repli portable (ARM Neoverse/Thor inclus).
-- ✅ **Tuile = 128 o sans padding** et **crate compilable + testé** : **51 tests** (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS Soft-Paging), dont l'identité de Hamming `d_s − 2·popcount` prouvée contre une référence brute, l'équivalence SIMD ≡ scalaire (fuzz randomisé), la finitude des scores, et la correspondance code ↔ eq. (2.3).
+- ✅ **Tuile = 128 o sans padding** et **crate compilable + testé** : **78 tests** scirust (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS Soft-Paging), dont l'identité de Hamming `d_s − 2·popcount` prouvée contre une référence brute, l'équivalence SIMD ≡ scalaire (fuzz randomisé), la finitude des scores, et la correspondance code ↔ eq. (2.3).
 
 **Avancées récentes & restant :**
 
@@ -379,7 +379,7 @@ Toutes les lignes de cache de l'appareil sont à **64 o** (L1d/L1i/L2 ; le « 12
 
 **Lecture :**
 
-- **~2,5× plus de tokens/s** pour SLHA, à débit mémoire (GB/s) comparable : lire **2× moins d'octets/token** (+ un dénibblage INT4→f32 plus court que le décodage bf16) se convertit directement en débit. C'est la thèse du « mur de bande passante » vérifiée au niveau du kernel.
+- **~2,5× plus de tokens/s** pour SLHA sur ce banc (Xeon AVX2), à débit mémoire (GB/s) comparable : lire **2× moins d'octets/token** (+ un dénibblage INT4→f32 plus court que le décodage bf16) se convertit directement en débit. C'est la thèse du « mur de bande passante » vérifiée au niveau du kernel. **Sur CPU scalaire le même banc donne ~1,3×** (le gain dépend de l'auto-vectorisation) ; le facteur de bout en bout (decode LLM complet) reste à mesurer.
 - **Le débit décroît quand le contexte grandit** (42→30 M/s pour SLHA) : effet de cache visible *indirectement*, l'empreinte plus petite de SLHA la gardant résidente plus longtemps.
 - **Honnêteté :** le LLC fait 260 Mo sur ce banc — on **ne sature pas la DRAM** (GB/s mesurés ≪ pic DRAM) ; le gain vient du volume d'octets et des uops, pas d'une limite DRAM atteinte. Les **compteurs de cache matériels (§6.1) sont indisponibles** ici (`perf` absent, `perf_event_paranoid = 2`). Sur un LLC plus petit, ou en décodage réellement DRAM-bound, l'avantage de SLHA serait plus marqué.
 

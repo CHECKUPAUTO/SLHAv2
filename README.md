@@ -9,8 +9,10 @@
 dans le cache de votre processeur, et pas seulement dans une carte graphique
 hors de prix.
 
-> **Concrètement :** un LLM qui a normalement besoin de 8 Go de VRAM peut tourner
-> avec SLHA v2 sur un PC portable avec 4 Go de RAM, sans ralentissement.
+> **Concrètement (projection) :** en compressant le KV-cache, un LLM qui
+> nécessite ~8 Go de VRAM pourrait tenir sur un CPU avec ~4 Go de RAM. C'est
+> l'objectif du projet — **à valider sur un modèle réel** : aucune mesure de bout
+> en bout n'existe encore (voir les *Réserves d'honnêteté* plus bas).
 
 ---
 
@@ -25,9 +27,14 @@ d'une ligne de texte — au lieu de plusieurs kilo-octets normalement.
 
 | Sans SLHA v2 | Avec SLHA v2 |
 |---|---|
-| ~500 Mo pour 32k tokens | ~4 Mo pour 32k tokens |
+| ~500 Mo pour 32k tokens¹ | ~4 Mo pour 32k tokens¹ |
 | Obligé d'avoir un GPU | Fonctionne sur CPU |
 | RAM saturée rapidement | Cache L1/L2/L3 utilisé intelligemment |
+
+> ¹ *Projection* par tuile de 128 o/token (basée sur une clé non compressée
+> ~15,6 ko/token). Le ratio **mesuré** au niveau kernel est 128 o vs 256 o pour
+> une clé bf16 = **2× moins d'octets/token** (§7.5) ; le facteur de bout en bout
+> sur un LLM réel reste à mesurer.
 
 > Le dépôt est un **workspace Cargo** : toutes les commandes ci-dessous se
 > lancent depuis la racine.
@@ -171,13 +178,13 @@ Voir le [guide d'intégration](docs/INTEGRATION.md) — **esquisse de conception
 
 ## État du projet
 
-- ✅ **Mécanisme validé** : **51 tests** (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS), clippy `-D warnings` clean, CI
+- ✅ **Mécanisme validé** : **85 tests** workspace (78 `scirust` + 7 `slha-mcp` : unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS), clippy `-D warnings` clean, CI
 - ✅ **Performance** : x86 **AVX2 ~×11,5 / AVX-512 ~×14,1** (banc Xeon partagé) ; ARM **NEON ~×5,7** (Jetson Thor AGX 128) — vs scalaire. _Ratios **indicatifs**, dépendants du CPU et de l'auto-vectorisation ; mesurez les vôtres : `cargo run --example cycles --release`._
 - ✅ **Multi-plateforme** : x86_64 (AVX2/AVX-512/VPOPCNTDQ) + ARM AArch64 (NEON, **mesuré sur Jetson Thor** ; `sve2` détecté) — kit `examples/platform_report`
 - ✅ **Fidélité** : cosinus 0,95–0,997 vs attention complète (sortie `softmax·V`)
 - ✅ **Soft-Paging** : cache KV élastique (`ccos::ElasticKvCache`) — pager la moitié des tuiles HOT→WARM laisse la sortie à **cos 0,9995** (`examples/ccos_softpaging`, §4)
 - ✅ **Auto-audit + accès agent** : outil `slha-audit` (rapports JSON/Markdown) et serveur **MCP** `slha-mcp` (5 outils, zéro dépendance) — [`docs/MCP.md`](docs/MCP.md)
-- ✅ **Intégration LLM réel** : guide de conception et esquisses pour llama.cpp/vLLM disponibles — [`docs/INTEGRATION.md`](docs/INTEGRATION.md)
+- 🟡 **Intégration LLM réel** : *esquisse* — guide de conception + croquis pour llama.cpp/vLLM disponibles ([`docs/INTEGRATION.md`](docs/INTEGRATION.md)), **non intégrée** dans un moteur d'inférence ; perplexité non mesurée.
 
 > Réserves d'honnêteté (projections synthétiques, `perf`/perplexité hors banc) :
 > voir [`FINDINGS.md`](FINDINGS.md) et `SLHAv2.md` §6–7.
@@ -192,7 +199,7 @@ et les [issues](https://github.com/CHECKUPAUTO/SLHAv2/issues).
 ```bash
 git clone https://github.com/CHECKUPAUTO/SLHAv2.git
 cd SLHAv2
-cargo test                              # 51 tests, doivent passer
+cargo test                              # 85 tests (workspace), doivent passer
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -201,18 +208,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## Licence
 
-Distribué sous **double licence**, au choix :
-
-- **MIT** — [`LICENSE-MIT`](LICENSE-MIT)
-- **Apache 2.0** — [`LICENSE-APACHE`](LICENSE-APACHE)
-
-Sauf mention contraire, toute contribution soumise sera couverte par cette
-double licence, sans condition supplémentaire (cf. Apache-2.0 §5).
-
-— [Forge CHECKUPAUTO](https://github.com/CHECKUPAUTO)
-
-## License
-
 Dual-licensed: [PolyForm Noncommercial 1.0.0](LICENSE.md) for noncommercial and personal
 use; commercial license required for any commercial use.
 See [LICENSING.md](LICENSING.md).
+
+— [Forge CHECKUPAUTO](https://github.com/CHECKUPAUTO)

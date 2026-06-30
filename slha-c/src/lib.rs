@@ -1,7 +1,8 @@
 use scirust::attention::slha_v2::{SciRustSlhaTile, D_C, RESIDUAL_WORDS};
 use scirust::audit;
+use std::os::raw::c_char;
 use std::panic::catch_unwind;
-use std::ptr;
+use std::ptr::NonNull;
 
 /// Opaque handle for the SLHA context (if needed in future, currently stateless).
 #[repr(C)]
@@ -10,12 +11,16 @@ pub struct SlhaContext {
 }
 
 /// Initialize the SLHA environment.
+///
+/// The kernel is currently stateless, so no context is allocated. We still
+/// return a non-null, well-aligned sentinel so C callers can keep a uniform
+/// `if (ctx == NULL) { /* error */ }` check without special-casing. The handle
+/// is a dangling (zero-sized) pointer that must never be dereferenced; when a
+/// real context is added later this will allocate it and gain a paired
+/// `slha_shutdown`.
 #[no_mangle]
 pub extern "C" fn slha_init() -> *mut SlhaContext {
-    // Currently stateless, but providing the entry point for future-proofing.
-    // Returning a dummy non-null pointer for now.
-    static mut DUMMY: u8 = 0;
-    std::ptr::addr_of_mut!(DUMMY) as *mut SlhaContext
+    NonNull::<SlhaContext>::dangling().as_ptr()
 }
 
 /// Process a single tile and compute the score.
@@ -52,14 +57,16 @@ pub unsafe extern "C" fn slha_process_tile(
 /// # Safety
 /// The returned pointer must be freed using `slha_free_string`.
 #[no_mangle]
-pub unsafe extern "C" fn slha_audit() -> *mut i8 {
+pub unsafe extern "C" fn slha_audit() -> *mut c_char {
     let result = catch_unwind(|| {
         let report = audit::run();
         let s = report.to_compact();
+        // CString::into_raw returns *mut c_char on every target; using c_char
+        // (not i8) keeps this compiling on aarch64 where c_char == u8.
         std::ffi::CString::new(s).unwrap().into_raw()
     });
 
-    result.unwrap_or(ptr::null_mut())
+    result.unwrap_or(std::ptr::null_mut())
 }
 
 /// Free a string allocated by the library.
@@ -67,8 +74,10 @@ pub unsafe extern "C" fn slha_audit() -> *mut i8 {
 /// # Safety
 /// `s` must be a pointer returned by `slha_audit`.
 #[no_mangle]
-pub unsafe extern "C" fn slha_free_string(s: *mut i8) {
+pub unsafe extern "C" fn slha_free_string(s: *mut c_char) {
     if !s.is_null() {
+        // SAFETY: `s` was produced by CString::into_raw in slha_audit and is
+        // freed exactly once by the caller.
         let _ = std::ffi::CString::from_raw(s);
     }
 }

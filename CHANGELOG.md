@@ -5,6 +5,54 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
 
 ## [Unreleased]
 
+### Fixed
+- **Build cassé sur aarch64 (PR#19, `slha-c`)** : `slha_audit`/`slha_free_string`
+  déclaraient `*mut i8` alors que `CString::into_raw`/`from_raw` utilisent
+  `*mut c_char` (qui vaut `*mut u8` sur aarch64 — `char` non signé sur ARM).
+  Corrigé en `*mut std::os::raw::c_char` (portable). La CI x86_64 ne le voyait
+  pas (c_char = i8 sur x86) et son step aarch64 ne construisait que `scirust` ;
+  ce step construit désormais `scirust` + `slha-c` + `slha-mcp` pour cible
+  aarch64 (les membres sans dépendance externe non-cross-compilable ; `slha-python`
+  /PyO3 reste exclu, il nécessite les dev libs Python aarch64).
+- **Licence des crates** : tous les manifests membres (`scirust`, `slha-mcp`,
+  `slha-c`, `slha-python`) déclaraient `license = "MIT OR Apache-2.0"` alors que
+  le dépôt est en double licence **PolyForm Noncommercial 1.0.0 + commerciale**.
+  Alignés sur `PolyForm-Noncommercial-1.0.0`. Les sections licence
+  contradictoires du `README` (MIT/Apache + liens vers `LICENSE-MIT`/
+  `LICENSE-APACHE` supprimés) et la FAQ de `docs/GETTING_STARTED.md` corrigées.
+- **`slha.h`** : ajout de la branche d'alignement 128 o
+  (`-DSLHA_CACHE_LINE_128=1`) et du chemin MSVC (`__declspec(align)`).
+- **`slha_init`** : remplace le `static mut DUMMY` (accès à static mutable,
+  évité en Rust moderne) par un `NonNull::dangling()` ; cycle de vie documenté.
+- **Robustesse numérique** : `metrics::softmax_into` ne produit plus de NaN/Inf
+  sur entrée tout-`-inf` (retourne une distribution uniforme, comme les autres
+  helpers sur entrée dégénérée). Test ajouté.
+- **Claims non étayés** : « sans ralentissement » / « 8 Go VRAM → 4 Go RAM » /
+  ratio 125× désormais qualifiés de projections (mesuré kernel = 2× vs clé bf16) ;
+  « imperceptible » et « Raspberry Pi » retirés (aucune mesure sur modèle réel
+  ni sur Pi). Statut « intégration LLM réel » repassé d'✅ à 🟡 (esquisse seule).
+  Table de comparaison de `docs/GETTING_STARTED.md` : retiré les claims
+  « Tient dans le cache CPU (L1/L2) » / « cache hit en 1-4 cycles » / « 200 Go/s »
+  (résidence cache non mesurée — §6.1, compteurs `perf` indisponibles ; 12 Mo ne
+  tiennent pas en L1/L2) et « libère 30% de mémoire » / « perte ~5% » du
+  Soft-Paging (§4 mesure −25 % d'empreinte et cos 0,9995 = 0,05 % de déviation).
+- **Comptes de tests** mis à jour : 85 workspace (78 `scirust` + 7 `slha-mcp`).
+- **CI rouge sur master (PR#19)** : le merge PR#19 avait laissé `cargo fmt
+  --all --check` cassé (`scirust/src/adapter.rs` et `slha-python/src/lib.rs`
+  non formatés — le `Format` step échouait en premier, masquant tout le reste).
+  `cargo fmt --all` appliqué. La CI master n'était donc plus verte depuis PR#19.
+- **Step `Benchmarks compile`** : `cargo bench --workspace --no-run` échouait
+  au link du « lib test » de `slha-python` en profil release/LTO — pyo3
+  `extension-module` ne link pas libpython (fourni par l'interpéteur au load),
+  et le LTO flaggue alors les symboles `Py_*` non résolus. `cargo build
+  --workspace --all-targets` et `cargo test --workspace` (profil dev, sans LTO)
+  restaient verts ; seul le profil release/bench était touché. Seul `scirust`
+  ayant des benches, le step cible désormais `cargo bench -p scirust --no-run`
+  (documenté dans `CONTRIBUTING.md`).
+- *Note historique* : l'entrée précédente mentionnant `LICENSE-MIT` +
+  `LICENSE-APACHE` à la racine est obsolète — ces fichiers ont été retirés et le
+  crate re-licencié en PolyForm Noncommercial (double licence commerciale).
+
 ### Added
 - **Plan d'amélioration — Phase 1 (fidélité) : axes A1 et A2** implémentés
   comme modules *additifs* (aucun changement à la tuile 128 o ni aux kernels

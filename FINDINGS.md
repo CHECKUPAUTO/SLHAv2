@@ -18,7 +18,7 @@ mesures ont **réellement** établi. Toutes les valeurs sont reproductibles
 | Soft-Paging HOT→WARM à faible `rho` ? | quasi sans perte (Spearman ~0,98) | §7.2 |
 | Le résidu 1-bit aide-t-il ? | **HOT ≥ WARM partout**, parfois +0,28 | §7.2–7.3 |
 | Fidélité de la **sortie** d'attention ? | **cosinus 0,95–0,997** vs FP | §7.6 |
-| Trafic mémoire vs bf16 ? | **2× moins d'octets/token → ~2,5× tokens/s** | §7.5 |
+| Trafic mémoire vs bf16 ? | **2× moins d'octets/token → ~2,5× tokens/s** (Xeon AVX2 ; ~1,3× sur CPU scalaire) | §7.5 |
 | Débit SIMD (vs scalaire) ? | x86 : AVX2 **×11,5**, AVX-512 **×14,1** ; ARM : NEON **×5,7** (Jetson Thor) | §7.4 |
 | Projection apprise vs PCA (Q≠K) ? | WARM **0,16 → 0,86** | §7.7 |
 | Cache KV élastique sous budget (Soft-Paging) ? | pager **½** des tuiles HOT→WARM : sortie à **cos 0,9995** | §4 |
@@ -27,7 +27,7 @@ mesures ont **réellement** établi. Toutes les valeurs sont reproductibles
 
 - **Le mécanisme est correct et implémentable.** Tuile 128 o sans gaspillage,
   score fusionné conforme à l'éq. (2.3), kernels scalaire/AVX2/AVX-512/NEON
-  **prouvés équivalents** (51 tests dont property/fuzz, clippy `-D warnings`, CI).
+  **prouvés équivalents** (78 tests scirust dont property/fuzz, clippy `-D warnings`, CI).
 - **Le « Soft-Paging » tient — et tourne.** À faible énergie résiduelle, libérer
   le résidu 1-bit (WARM) est quasi sans perte ; le résidu redevient utile quand
   la base bas-rang laisse passer de l'énergie. La politique HOT/WARM/COLD est
@@ -40,7 +40,7 @@ mesures ont **réellement** établi. Toutes les valeurs sont reproductibles
   score. C'est le proxy le plus proche de la perplexité accessible hors LLM.
 - **L'argument « mur de bande passante » tient au niveau kernel.** 128 o/token
   contre 256 o pour une clé bf16 → **~2,5× plus de tokens/s** à débit GB/s
-  comparable.
+  comparable (sur Xeon AVX2 ; **~1,3× sur CPU scalaire**).
 - **Mesuré sur les deux cibles (x86 + ARM).** Le kit `platform_report` produit
   des chiffres x86 (AVX-512 ~×14 sur Xeon) **et** ARM **mesurés sur un Jetson
   Thor AGX 128** (Neoverse-V3AE) : NEON **~×5,7** vs scalaire. Au passage il a
@@ -108,4 +108,4 @@ mesures ont **réellement** établi. Toutes les valeurs sont reproductibles
    bout** (et non au seul niveau kernel).
 
 ---
-*Réf. : crate `scirust/` (51 tests dont property/fuzz + doctests + calibration λ + CCOS, criterion, CI), paper `SLHAv2.md` §1–8.*
+*Réf. : crate `scirust/` (78 tests dont property/fuzz + doctests + calibration λ + CCOS, criterion, CI), paper `SLHAv2.md` §1–8.*
