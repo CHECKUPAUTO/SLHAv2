@@ -22,10 +22,13 @@ Pour le chemin NEON (ARM), vérifiez la cross-compilation :
 
 ```bash
 rustup target add aarch64-unknown-linux-gnu
-# Même commande que la CI : scirust (chemin NEON) + slha-c (C-ABI, qui a déjà
-# cassé sur aarch64) + slha-mcp. slha-python (PyO3) est exclu — il nécessite
-# les dev libs Python aarch64.
-cargo build -p scirust -p slha-c -p slha-mcp --lib --target aarch64-unknown-linux-gnu
+# Même commande que la CI : on type-check (cargo check, pas build) scirust
+# (chemin NEON) + slha-c (C-ABI, qui a déjà cassé sur aarch64) + slha-mcp
+# contre la cible aarch64. `check` résout cfg(target_arch = "aarch64") sans
+# link final — un `build` cross-linkerait slha-c (cdylib) et slha-mcp (bin)
+# et demanderait un cross-linker aarch64 absent sur un hôte x86_64.
+# slha-python (PyO3) est exclu — il nécessite les dev libs Python aarch64.
+cargo check -p scirust -p slha-c -p slha-mcp --target aarch64-unknown-linux-gnu
 ```
 
 ## Principes du projet

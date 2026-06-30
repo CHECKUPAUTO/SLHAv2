@@ -36,12 +36,17 @@ jobs:
         # --all-targets` and `cargo test --workspace` (dev profile, no LTO) stay
         # green; only the release/bench link is affected.
         run: cargo bench -p scirust --no-run
-      - name: AArch64 cross-compile (NEON path + C-ABI crate)
-        # Build scirust (NEON kernel path) AND slha-c (C-ABI, the crate that
-        # broke on aarch64 because of `*mut i8` vs `*mut c_char`) + slha-mcp,
-        # the workspace members with no external (non-cross-compiling) deps.
+      - name: AArch64 cross-check (NEON path + C-ABI crate)
+        # Type-check scirust (NEON kernel path), slha-c (C-ABI, the crate that
+        # broke on aarch64 because of `*mut i8` vs `*mut c_char`) and slha-mcp
+        # against the aarch64 target. We use `cargo check` (not `build`) so the
+        # cfg `target_arch = "aarch64"` is resolved (NEON intrinsics are
+        # verified, `c_char` is `u8` not `i8`) WITHOUT a final link — which would
+        # otherwise need an aarch64 cross-linker absent on the x86_64 runner
+        # (`slha-c` is a cdylib, `slha-mcp` a bin; both link). The `*mut i8` vs
+        # `*mut u8` regression is a type error (E0308), caught at check time.
         # slha-python (PyO3) is excluded: it needs aarch64 Python dev libs.
-        run: cargo build -p scirust -p slha-c -p slha-mcp --lib --target aarch64-unknown-linux-gnu
+        run: cargo check -p scirust -p slha-c -p slha-mcp --target aarch64-unknown-linux-gnu
       - name: Publish dry-run (scirust is crates.io-ready)
         run: cargo publish -p scirust --dry-run
 

@@ -11,9 +11,12 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
   `*mut c_char` (qui vaut `*mut u8` sur aarch64 — `char` non signé sur ARM).
   Corrigé en `*mut std::os::raw::c_char` (portable). La CI x86_64 ne le voyait
   pas (c_char = i8 sur x86) et son step aarch64 ne construisait que `scirust` ;
-  ce step construit désormais `scirust` + `slha-c` + `slha-mcp` pour cible
-  aarch64 (les membres sans dépendance externe non-cross-compilable ; `slha-python`
-  /PyO3 reste exclu, il nécessite les dev libs Python aarch64).
+  ce step type-check désormais `scirust` + `slha-c` + `slha-mcp` contre la cible
+  aarch64 (`cargo check`, pas `build` — un cross-`build` linkerait `slha-c`
+  (cdylib) et `slha-mcp` (bin) et demanderait un cross-linker aarch64 absent sur
+  le runner x86_64 ; `check` résout `cfg(target_arch="aarch64")` et attrape
+  l'erreur de type E0308 sans linker). `slha-python` (PyO3) reste exclu (dev libs
+  Python aarch64).
 - **Licence des crates** : tous les manifests membres (`scirust`, `slha-mcp`,
   `slha-c`, `slha-python`) déclaraient `license = "MIT OR Apache-2.0"` alors que
   le dépôt est en double licence **PolyForm Noncommercial 1.0.0 + commerciale**.
