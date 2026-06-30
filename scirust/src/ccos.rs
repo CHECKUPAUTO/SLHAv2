@@ -121,6 +121,26 @@ impl ElasticKvCache {
         c
     }
 
+    /// **First-touch NUMA hint (Linux + `numa` feature).** Pin the calling thread
+    /// to its current CPU's local NUMA node *before* bulk-inserting / warming the
+    /// arena, so the first-touch policy places the arena's pages on the local node
+    /// (avoids inter-socket traffic on multi-socket hosts). Best-effort: returns
+    /// the pinned CPU on success, or `None` if the `numa` feature is off / the
+    /// target is non-Linux / pinning failed — in which case the cache still works
+    /// correctly, just without the locality guarantee.
+    ///
+    /// Call this once, from the inference thread, right before the warm-up loop
+    /// (or before the first `insert` storm). It is a no-op allocation-wise and
+    /// safe to call multiple times. On a single-NUMA-node host (e.g. Jetson Thor)
+    /// it still pins, which avoids spurious thread migration.
+    ///
+    /// Note: the arena is a plain `Vec` (allocator-global, not page-aligned), so we
+    /// rely on first-touch rather than `mbind` (which needs page-aligned regions —
+    /// see [`crate::numa::NumaBuffer`] for the page-aligned path).
+    pub fn pin_caller_to_local_numa() -> Option<usize> {
+        crate::numa::pin_current_thread_local().ok()
+    }
+
     /// Insert a HOT tile, reusing a recycled (COLD) slot when available. Returns
     /// the slot id. The slot's H2O importance is (re)set to 0.
     pub fn insert(&mut self, tile: SciRustSlhaTile) -> usize {

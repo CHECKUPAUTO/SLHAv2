@@ -19,3 +19,6 @@ Thumbs.db
 # Benchmark reports
 *.svg
 *.html
+
+# Rapport slha-audit genere (host-specific, ex. aarch64 NEON/cache)
+/audit.json
