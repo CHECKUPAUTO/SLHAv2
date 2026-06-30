@@ -114,10 +114,13 @@ fi
 banner "3. Tests, docs, benches"
 step "test debug (workspace)"         600 -- cargo test --workspace
 if [ $QUICK -eq 0 ]; then
-  step "test release (workspace)"     600 -- cargo test --workspace --release
+  # slha-python (PyO3 extension-module) ne linke pas libpython en profil
+  # release/LTO (symboles Py_* non résolus) ⇒ exclu des tests release.
+  step "test release (excl. slha-python)" 600 -- cargo test --workspace --release --exclude slha-python
 fi
 step "doc build (--no-deps)"          300 -- cargo doc --no-deps --workspace
-step "benches compile (--no-run)"     600 -- cargo bench --workspace --no-run
+# Seul scirust a des benches ; `cargo bench --workspace` casserait au link de slha-python.
+step "benches compile (scirust)"      600 -- cargo bench -p scirust --no-run
 
 # ── 4. cross-compile (aarch64 NEON path) ────────────────────────────────────
 banner "4. Cross-compile (aarch64 / NEON path)"
