@@ -72,6 +72,33 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
   safe Rust portable (x86_64/aarch64/…) ; self-audit `slha-audit` reste 7/7.
   Tests unitaires + d'intégration + doctests ; docs dans `docs/api.md` et
   `SLHAv2.md` §5.1.
+- **Pool NUMA-aware + épinglage de thread + allocation alignée**
+  (`scirust::numa`) — axe A du point 5 (roadmap d'optimisation matérielle,
+  Phase 2). Deux niveaux d'API :
+  - **`AlignedBuffer`** — allocation heap alignée 128 o (ligne de cache, ou
+    alignement configurable) via l'allocateur global `std::alloc`. **Portables,
+    zéro dépendance, disponibles par défaut** sur toutes cibles (x86_64/aarch64/…)
+    pour aligner les buffers chauds du chemin SIMD indépendamment du NUMA.
+  - **Feature optionnelle `numa`** (Linux + `libc` en dépendance *optionnelle* —
+    la configuration par défaut reste **sans dépendance externe**) : `NumaBuffer`
+    (région `mmap(MAP_ANONYMOUS|MAP_PRIVATE)` page-alignée + `mbind(MPOL_BIND,
+    MPOL_MF_MOVE)` best-effort vers le nœud local), `pin_current_thread_to_cpu`
+    / `pin_current_thread_local` (`sched_setaffinity`), introspection
+    `current_cpu`/`current_node`/`num_nodes`/`numa_available` (parsing sysfs
+    `/sys/devices/system/node`). Repli gracieux hors Linux / sans la feature
+    (`NumaError::Unavailable` ; `NumaBuffer` non construisible). **Intégration
+    first-touch** sur l'arena KV-cache : `ElasticKvCache::pin_caller_to_local_numa`
+    épingle le thread d'inférence à son CPU local avant le warm-up — les pages du
+    `Vec` (non page-aligné, donc `mbind` peu fiable) atterrissent sur le bon nœud
+    par first-touch, sans `mbind`. Sur Jetson Thor (mémoire unifiée, mono-NUMA),
+    `numa_available()` rend `false` et l'épinglage reste utile (évite les
+    migrations de thread). CI : nouveau job dédié `numa-check` (check + clippy +
+    build + test + doc + cross-check aarch64, tous avec `--features numa`) ; job
+    `msrv` étendu (`cargo check -p scirust --features numa --all-targets`).
+    Tests d'intégration (`scirust/tests/numa.rs`) : `AlignedBuffer` (alignement,
+    zero, roundtrip, rejets d'alignement invalide, len nulle) + chemin Linux réel
+    best-effort (tolérant mono-nœud/permissions CI) + repli stub. Self-audit
+    `slha-audit` reste 7/7. Docs : `docs/api.md`, `SLHAv2.md` §5.1.
 - **Plan d'amélioration — Phase 1 (fidélité) : axes A1 et A2** implémentés
   comme modules *additifs* (aucun changement à la tuile 128 o ni aux kernels
   SIMD ; les 51 tests historiques restent verts). Voir
