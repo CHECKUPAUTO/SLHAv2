@@ -57,6 +57,21 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
   crate re-licencié en PolyForm Noncommercial (double licence commerciale).
 
 ### Added
+- **Filtre de sécurité géométrique latent** (`scirust::safety`,
+  `LatentSafetyGuard`) — axe C du point 5 (roadmap d'optimisation matérielle,
+  Phase 1). Classifieur ultra-léger (~200 cycles, zéro allocation) opérant
+  **directement sur les vecteurs latents compressés** (`[u8; 64]`, INT4) avant
+  décompression, pour bloquer injections de prompts / jailbreaks / dérives
+  sémantiques avant la génération du token. Trois signaux testés dans l'ordre :
+  (1) déviation angulaire — cosinus vs vecteur directeur de référence
+  (magnitude-invariant, normalisé par `‖v‖`) ; (2) isolation orthogonale —
+  classifieur linéaire optionnel (`with_linear_classifier`) ; (3) dérive
+  glissante — moyenne du cosinus sur une fenêtre de 4 échantillons, évaluée
+  seulement une fois la fenêtre pleine (évite les faux positifs au démarrage).
+  Module **additif** : n'altère ni la tuile 128 o ni les kernels SIMD ; pur
+  safe Rust portable (x86_64/aarch64/…) ; self-audit `slha-audit` reste 7/7.
+  Tests unitaires + d'intégration + doctests ; docs dans `docs/api.md` et
+  `SLHAv2.md` §5.1.
 - **Plan d'amélioration — Phase 1 (fidélité) : axes A1 et A2** implémentés
   comme modules *additifs* (aucun changement à la tuile 128 o ni aux kernels
   SIMD ; les 51 tests historiques restent verts). Voir

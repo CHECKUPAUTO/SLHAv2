@@ -22,6 +22,7 @@ et [`../FINDINGS.md`](../FINDINGS.md).
 | `linalg` | `jacobi_eigh` (décomposition propre symétrique, pour la PCA) |
 | `learned` | `LearnedModel` (PCA + SGD task-aware), `train_projection`, `gen_keys` |
 | `scenario` | `Projection` (sign-LSH), `build_tile`, `generate` (données synthétiques) |
+| `safety` | `LatentSafetyGuard` — filtre de sécurité géométrique dans l'espace latent compressé (anti-injection, anti-dérive), opère avant décompression |
 
 ## Constantes (`attention::slha_v2`)
 
@@ -114,6 +115,55 @@ pub fn quantize_latent_nf4(v: &[f32; 128]) -> ([u8; 64], f32, [u8; 8]);
 
 `LatentCodec { Int4Single, Int4Grouped, Nf4 }` sélectionne le codec via
 `LearnedModel::encode_with(key, pos, warm, codec)`.
+
+## `safety` — Filtre de sécurité géométrique latent
+
+Classifieur ultra-léger opérant **directement sur les vecteurs latents compressés**
+(`[u8; 64]`, 128 dims INT4) sans déquantification complète, pour détecter les anomalies
+géométriques typiques des injections de prompts / jailbreaks / dérives sémantiques
+**avant la phase de décompression**. Module **additif** : n'altère ni la tuile de 128 o,
+ni les kernels SIMD.
+
+```rust
+use scirust::safety::{LatentSafetyGuard, SafetyResult, SafetyReason};
+
+// `reference` calibrée sur un corpus de prompts normaux (normalisée à l'unité).
+let mut guard = LatentSafetyGuard::new([1.0f32; 128], 0.5);
+// ou avec classifieur linéaire entraîné (signal 2) :
+//   LatentSafetyGuard::with_linear_classifier(reference, weights, bias, 0.15);
+
+let latent_kv: [u8; 64] = /* tuile compressée */;
+match guard.analyze(&latent_kv) {
+    SafetyResult::Safe => { /* décompresser, générer le token */ }
+    SafetyResult::Anomalous { deviation, reason } => { /* bloquer avant décompression */ }
+}
+```
+
+**Trois signaux testés dans l'ordre** (le premier qui déclenche retourne son anomalie) :
+
+1. **Déviation angulaire** (`DotProductDeviation`) — cosinus vs vecteur directeur de
+   référence < `dot_threshold`. Magnitude invariant (normalisé par la norme du vecteur
+   analysé). Un vecteur nul (norme indéfinie) est rangé ici.
+2. **Isolation orthogonale** (`OrthogonalIsolation`) — score du classifieur linéaire
+   `dot(weights, v)/‖v‖ + bias` < `orthogonal_threshold`. Optionnel (activé via
+   `with_linear_classifier`).
+3. **Dérive sémantique** (`ActivationDrift`) — moyenne glissante du cosinus sur une
+   fenêtre de `DRIFT_WINDOW` (=4) échantillons < `drift_threshold`. N'est évaluée qu'une
+   fois la fenêtre pleine (évite les faux positifs au démarrage). La bande
+   `[dot_threshold, drift_threshold[` capture des vecteurs *individuellement plausibles
+   mais collectivement dérivants*.
+
+| Méthode | Rôle |
+|---|---|
+| `new(reference, dot_threshold)` | Guard avec référence + seuil cosinus (défaut ≈ cos 60°) |
+| `with_linear_classifier(reference, weights, bias, orthogonal_threshold)` | Ajoute le signal 2 |
+| `analyze(&[u8; 64])` | Analyse une tuile compressée (décode les nibbles INT4, point zéro 8) |
+| `analyze_dequantized(&[f32; 128])` | Analyse un vecteur déquantisé |
+| `last_cosine()` | Dernier cosinus mesuré (1.0 = alignement parfait) |
+
+Coût : ~200 cycles/tuile (produit scalaire sur 128 dims), zéro allocation. Fonctionne
+sur toutes les architectures (x86_64, aarch64, RISC-V…). Seuils et fenêtre sont des
+constances internes ajustables à la compilation.
 
 ## Features Cargo
 
