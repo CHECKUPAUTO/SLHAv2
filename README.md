@@ -6,29 +6,59 @@
 
 ---
 
-**SLHA v2** compresse la mémoire des IA conversationnelles pour qu'elles tiennent
-dans le cache de votre processeur, et pas seulement dans une carte graphique
-hors de prix.
+Faire tourner une IA en contexte long chez soi exige normalement une carte
+graphique hors de prix : à chaque mot généré, l'IA doit se souvenir de tout ce
+qui précède, et ce « souvenir » — le **KV-cache** — grossit sans cesse jusqu'à
+saturer la VRAM.
 
-> **Concrètement :** un LLM qui a normalement besoin de 8 Go de VRAM peut tourner
-> avec SLHA v2 sur un PC portable avec 4 Go de RAM, sans ralentissement.
+**SLHA v2** compresse ce KV-cache en tuiles de **128 octets** alignées
+cache-line — l'équivalent d'une ligne de texte par token, au lieu de plusieurs
+kilo-octets. Deux lignes de cache de 64 octets, conçues pour rester proches du
+processeur (caches L1/L2/L3) plutôt que de dépendre d'un GPU.
 
----
+### Ce que vous pouvez faire
 
-## Comment ça marche (en 30 secondes)
+- **Compresser** chaque clé d'attention : latent bas-rang INT4 (codecs MX par
+  groupe, INT4 uniforme ou NF4) + résidu de correction 1-bit (sign-LSH), le tout
+  dans une tuile de 128 o (`512 o FP32 → 128 o`, facteur ×4).
+- **Scorer** vite : score hybride (produit scalaire continu + `popcount`
+  binaire), avec dispatch SIMD à l'exécution — **AVX2 / AVX-512** sur x86_64,
+  **NEON** sur aarch64, et **repli scalaire portable** partout ailleurs. Chaque
+  chemin SIMD est **vérifié équivalent au scalaire** par test (à 1e-3 près —
+  FMA / accumulation réordonnée ; le sous-terme `popcount`, lui, est exact).
+- **Piloter la mémoire sous budget** : cache KV élastique CCOS (Soft-Paging) qui
+  bascule les tuiles entre les états HOT / WARM / COLD selon l'énergie résiduelle
+  et l'ancienneté.
+- **Auditer** : le binaire `slha-audit` vérifie à l'exécution le layout des
+  tuiles, l'équivalence SIMD / scalaire, la fidélité de sortie, l'invariant de
+  budget CCOS et le déterminisme — rapport Markdown ou JSON, avec diff de
+  régression (`--diff`).
+- **Brancher un agent** : le serveur **MCP** `slha-mcp` (stdio, JSON-RPC 2.0)
+  expose 5 outils — `slha.audit`, `slha.explain`, `slha.compress`, `slha.score`,
+  `slha.benchmark` — appelables depuis tout client MCP (Claude Code / Desktop).
 
-Quand une IA génère du texte, elle doit se souvenir de tout ce qui a été dit
-avant. Ce « souvenir » (le **KV-cache**) grossit à chaque mot et sature la
-mémoire.
-
-SLHA v2 compresse chaque souvenir en une **tuile de 128 octets** — l'équivalent
-d'une ligne de texte — au lieu de plusieurs kilo-octets normalement.
+### Pourquoi ça change la donne
 
 | Sans SLHA v2 | Avec SLHA v2 |
 |---|---|
 | ~500 Mo pour 32k tokens | ~4 Mo pour 32k tokens |
 | Obligé d'avoir un GPU | Fonctionne sur CPU |
 | RAM saturée rapidement | Cache L1/L2/L3 utilisé intelligemment |
+
+### Des fondations vérifiables
+
+**58 tests** au total (51 `scirust` + 7 `slha-mcp`), `clippy -D warnings`,
+`cargo doc` propre (warnings = erreurs), MSRV **Rust 1.89**, double licence
+**MIT OR Apache-2.0**, et `cargo publish -p scirust --dry-run` qui passe sans
+avertissement. Les accélérations SIMD sont mesurées à titre indicatif (banc
+partagé, dépendantes du matériel), pas annoncées comme des garanties.
+
+### Périmètre
+
+Workspace Cargo de deux crates **zéro-dépendance externe** (v0.2.0) :
+**`scirust`** (noyau de référence, qui fournit aussi le binaire `slha-audit`) et
+**`slha-mcp`** (serveur MCP, qui réutilise `scirust::json`). Importé comme
+bibliothèque, le noyau n'ajoute **rien** à votre arbre de dépendances.
 
 > Le dépôt est un **workspace Cargo** : toutes les commandes ci-dessous se
 > lancent depuis la racine.

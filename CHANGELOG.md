@@ -5,6 +5,10 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
 
 ## [Unreleased]
 
+_(rien pour l'instant — la prochaine version listera ses changements ici.)_
+
+## [0.2.0] — 2026-06-30
+
 ### Added
 - **Serveur MCP `slha-mcp`** (nouveau crate du workspace, **zéro dépendance
   externe** — réutilise `scirust::json`) : serveur Model Context Protocol sur
