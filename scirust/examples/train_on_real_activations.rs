@@ -11,6 +11,13 @@
 //! ```text
 //! cargo run --release --example train_on_real_activations -- --dump DIR --rht --out proj.slhw
 //! ```
+//! With `--joint` the projection is fitted on the pooled second moment of the
+//! keys **and** the real queries (`q.bin`, plan §1.3): the coarse score is
+//! `⟨Pq, Pk⟩`, so query energy outside the key subspace is otherwise lost —
+//! measured on GPT-2, a keys-only PCA keeps just ~70% of real-query energy:
+//! ```text
+//! cargo run --release --example train_on_real_activations -- --dump DIR --joint --out proj.slhw
+//! ```
 
 // Numeric loops read closer to the math with indexing.
 #![allow(clippy::needless_range_loop)]
@@ -31,6 +38,7 @@ fn main() {
     };
     let dump = opt("--dump");
     let rht = args.iter().any(|a| a == "--rht");
+    let joint = args.iter().any(|a| a == "--joint");
     let out = opt("--out").unwrap_or_else(|| {
         std::env::temp_dir()
             .join("slha_projection.slhw")
@@ -46,6 +54,10 @@ fn main() {
             (k, d, format!("activations RÉELLES {dir}/k.bin"))
         }
         None => {
+            assert!(
+                !joint,
+                "--joint nécessite --dump (il apprend sur les VRAIES requêtes q.bin)"
+            );
             let d = 256usize;
             let k = gen_keys(1, 2000, d, d, 0.9, 0.02);
             (k, d, "synthétique réaliste (gen_keys)".to_string())
@@ -55,19 +67,48 @@ fn main() {
         d > D_C,
         "SLHA needs a key dim > {D_C}; got d={d} (dump a wider key representation)."
     );
+    // Real queries for the joint (score-aware) objective.
+    let queries: Vec<Vec<f32>> = if joint {
+        let dir = dump.as_ref().unwrap();
+        let (q, dq) = load_k_bin(&format!("{dir}/q.bin"));
+        assert_eq!(dq, d, "q.bin and k.bin must share the key dimension");
+        q
+    } else {
+        Vec::new()
+    };
 
     println!("== Phase 1 — entraînement + sauvegarde d'une projection APPRISE ==\n");
     println!("  clés d'entraînement : {source} — n={}, d={d}", keys.len());
+    println!(
+        "  objectif             : {}",
+        if joint {
+            format!(
+                "sous-espace JOINT clés+requêtes (--joint, §1.3) — {} requêtes",
+                queries.len()
+            )
+        } else {
+            "clés seules (PCA)".to_string()
+        }
+    );
     println!(
         "  incohérence RHT (A2) : {}\n",
         if rht { "activée" } else { "désactivée" }
     );
 
-    // Train (PCA).
-    let model = LearnedModel::fit_with(&keys, d, seed, false, rht);
+    // Train (PCA on keys, or on the pooled keys+queries second moment).
+    let model = if joint {
+        LearnedModel::fit_joint(&keys, &queries, d, seed, false, rht)
+    } else {
+        LearnedModel::fit_with(&keys, d, seed, false, rht)
+    };
     println!(
-        "  énergie captée par le sous-espace top-{D_C} : {:.2}%",
-        model.captured_energy * 100.0
+        "  énergie captée par le sous-espace top-{D_C} : {:.2}%{}",
+        model.captured_energy * 100.0,
+        if joint {
+            "  (énergie POOLÉE clés+requêtes)"
+        } else {
+            ""
+        }
     );
 
     // Save → reload → prove the round-trip is exact.

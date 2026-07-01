@@ -80,7 +80,50 @@ impl LearnedModel {
         for c in cov.iter_mut() {
             *c *= inv;
         }
+        Self::fit_from_cov(cov, d, seed, whiten, rht)
+    }
 
+    /// Fit on the pooled second moment of **keys and queries** (first step of
+    /// the plan's §1.3 score-aware objective). The coarse score is `⟨P·q, P·k⟩`,
+    /// so query energy outside `span(P)` is lost even when the keys reconstruct
+    /// perfectly — and real query distributions carry such energy (measured on
+    /// held-out GPT-2 layer-6 activations: a keys-only PCA keeps 69.6% of the
+    /// real queries' energy, and pooling raises the float coarse-score
+    /// attention-output cosine from 0.958 to 0.971). With `queries` empty this
+    /// is exactly [`Self::fit_with`] (same covariance, bit-identical).
+    ///
+    /// `captured_energy` is the *pooled* (keys + queries) captured fraction.
+    pub fn fit_joint(
+        keys: &[Vec<f32>],
+        queries: &[Vec<f32>],
+        d: usize,
+        seed: u64,
+        whiten: bool,
+        rht: bool,
+    ) -> Self {
+        assert!(d > D_C, "need d > D_C for a non-trivial residual");
+        let n = (keys.len() + queries.len()).max(1);
+
+        let mut cov = vec![0.0f32; d * d];
+        for v in keys.iter().chain(queries) {
+            for i in 0..d {
+                let vi = v[i];
+                let row = i * d;
+                for j in 0..d {
+                    cov[row + j] += vi * v[j];
+                }
+            }
+        }
+        let inv = 1.0 / n as f32;
+        for c in cov.iter_mut() {
+            *c *= inv;
+        }
+        Self::fit_from_cov(cov, d, seed, whiten, rht)
+    }
+
+    /// Shared tail of the `fit*` constructors: eigendecompose a d×d second
+    /// moment, keep the top-`D_C` subspace, seed `Z` (+ optional RHT).
+    fn fit_from_cov(cov: Vec<f32>, d: usize, seed: u64, whiten: bool, rht: bool) -> Self {
         let (eigvals, eigvecs) = jacobi_eigh(&cov, d);
 
         let mut idx: Vec<usize> = (0..d).collect();
@@ -813,5 +856,59 @@ mod tests {
                  (pre {pre:.3} vs post {post:.3} at rank {rank})"
             );
         }
+    }
+
+    #[test]
+    fn fit_joint_with_no_queries_equals_fit_with() {
+        let d = 160;
+        let keys = gen_keys(3, 200, d, d, 0.9, 0.02);
+        let a = LearnedModel::fit_with(&keys, d, 7, false, false);
+        let b = LearnedModel::fit_joint(&keys, &[], d, 7, false, false);
+        assert_eq!(a.projection(), b.projection(), "projection differs");
+        assert_eq!(a.captured_energy, b.captured_energy);
+    }
+
+    /// Keys live in dims 0..130; queries carry most of their energy in dims
+    /// 130..160 that the keys never touch. A keys-only PCA cannot keep those
+    /// directions (its covariance is zero there); the joint fit must.
+    #[test]
+    fn fit_joint_keeps_query_only_directions() {
+        let (d, n) = (160usize, 300usize);
+        let mut rng = Rng::new(42);
+        let mut keys = Vec::with_capacity(n);
+        let mut queries = Vec::with_capacity(n);
+        for _ in 0..n {
+            let mut k = vec![0.0f32; d];
+            rng.fill_gaussian(&mut k[..130]);
+            keys.push(k);
+
+            let mut q = vec![0.0f32; d];
+            rng.fill_gaussian(&mut q[..20]);
+            let mut tail = vec![0.0f32; 30];
+            rng.fill_gaussian(&mut tail);
+            for (i, t) in tail.iter().enumerate() {
+                q[130 + i] = 3.0 * t;
+            }
+            queries.push(q);
+        }
+        // Mean captured query energy ||P·q||²/||q||² (scale = 1: latent = e·q).
+        let captured_q = |m: &LearnedModel| -> f32 {
+            let mut acc = 0.0f32;
+            for q in &queries {
+                let h = m.latent(q);
+                let num: f32 = h.iter().map(|x| x * x).sum();
+                let den: f32 = q.iter().map(|x| x * x).sum();
+                acc += num / den;
+            }
+            acc / queries.len() as f32
+        };
+        let keys_only = LearnedModel::fit_with(&keys, d, 9, false, false);
+        let joint = LearnedModel::fit_joint(&keys, &queries, d, 9, false, false);
+        let (ko, jo) = (captured_q(&keys_only), captured_q(&joint));
+        assert!(
+            ko < 0.3,
+            "keys-only PCA unexpectedly kept query energy: {ko}"
+        );
+        assert!(jo > 0.8, "joint fit failed to keep query energy: {jo}");
     }
 }
