@@ -21,8 +21,9 @@
 //! *unchanged* fixed-size tile and kernel.
 
 use crate::attention::slha_v2::{
-    quantize_latent, quantize_latent_grouped, quantize_latent_nf4, LatentCodec, SciRustSlhaTile,
-    D_C, D_S, FLAG_NF4, FLAG_WARM, N_GROUPS, RESIDUAL_WORDS,
+    quantize_latent, quantize_latent_grouped, quantize_latent_mixed, quantize_latent_nf4,
+    LatentCodec, SciRustSlhaTile, D_C, D_S, FLAG_MIXED, FLAG_NF4, FLAG_WARM, N_GROUPS,
+    RESIDUAL_WORDS,
 };
 use crate::incoherence::HadamardIncoherence;
 use crate::linalg::jacobi_eigh;
@@ -305,18 +306,22 @@ impl LearnedModel {
         codec: LatentCodec,
     ) -> SciRustSlhaTile {
         let h = self.latent(key);
-        let (latent, scale, group_scales, nf4) = match codec {
+        let (latent, scale, group_scales, codec_flag) = match codec {
             LatentCodec::Int4Single => {
                 let (l, s) = quantize_latent(&h);
-                (l, s, [255u8; N_GROUPS], false)
+                (l, s, [255u8; N_GROUPS], 0)
             }
             LatentCodec::Int4Grouped => {
                 let (l, s, gs) = quantize_latent_grouped(&h);
-                (l, s, gs, false)
+                (l, s, gs, 0)
             }
             LatentCodec::Nf4 => {
                 let (l, s, gs) = quantize_latent_nf4(&h);
-                (l, s, gs, true)
+                (l, s, gs, FLAG_NF4)
+            }
+            LatentCodec::Mixed => {
+                let (l, s, gs) = quantize_latent_mixed(&h);
+                (l, s, gs, FLAG_MIXED)
             }
         };
         let recon = self.reconstruct(&h);
@@ -327,10 +332,7 @@ impl LearnedModel {
         let bitmap = self.sign_bits(&e);
         let sigma_e = (e.iter().map(|x| x * x).sum::<f32>() / self.d as f32).sqrt();
         let lambda = sigma_e * (std::f32::consts::PI / (2.0 * D_S as f32)).sqrt();
-        let mut flags = if warm { FLAG_WARM } else { 0 };
-        if nf4 {
-            flags |= FLAG_NF4;
-        }
+        let flags = if warm { FLAG_WARM } else { 0 } | codec_flag;
         SciRustSlhaTile {
             latent_kv: latent,
             residual_bitmap: bitmap,

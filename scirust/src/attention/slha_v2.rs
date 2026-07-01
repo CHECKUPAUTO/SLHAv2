@@ -42,6 +42,36 @@ pub const FLAG_HOT: u16 = 0;
 pub const FLAG_WARM: u16 = 1 << 0;
 /// Latent uses the NF4 (NormalFloat-4) codebook instead of uniform INT4.
 pub const FLAG_NF4: u16 = 1 << 1;
+/// Latent uses the mixed-precision layout: the top [`MIXED_HI_DIMS`] dims at
+/// 8-bit, the next [`MIXED_LO_DIMS`] at 4-bit, the tail dropped — same 64 bytes.
+pub const FLAG_MIXED: u16 = 1 << 2;
+
+// --- Mixed-precision latent layout (FLAG_MIXED) ------------------------------
+// Real transformer keys concentrate energy in a few directions (GPT-2 layer 6:
+// 40% of ALL key energy in ONE direction, 87% in four, a 56× magnitude range
+// inside the first 16-dim scaling group). Uniform INT4's 16 levels cannot span
+// that range, and the resulting coarse-score error dominates the total loss
+// (measured: attention-output cosine 0.958 float → 0.834 uniform INT4).
+// Spending the same 64 bytes non-uniformly — 8 bits where the energy is —
+// recovers nearly all of it (0.953–0.956 in the same measurement).
+/// Dims stored at 8-bit (one signed byte each) by the mixed codec.
+pub const MIXED_HI_DIMS: usize = 8;
+/// Dims stored at 4-bit after the 8-bit block: the remaining 56 bytes.
+pub const MIXED_LO_DIMS: usize = 2 * (LATENT_BYTES - MIXED_HI_DIMS); // 112
+/// Latent dims the mixed codec keeps; the `D_C − MIXED_DIMS` lowest-variance
+/// dims are dropped (PCA orders dims by decreasing variance, so the tail is
+/// the ~0%-energy end of the spectrum).
+pub const MIXED_DIMS: usize = MIXED_HI_DIMS + MIXED_LO_DIMS; // 120
+/// 4-bit micro-scaling groups (16 dims each, like the uniform grouped codec);
+/// `group_scales[0]` is the 8-bit block's scale, `group_scales[1..]` these.
+pub const MIXED_LO_GROUPS: usize = N_GROUPS - 1; // 7 × GROUP_DIM = 112
+
+// The mixed layout must spend exactly the 64-byte latent budget, reuse the
+// 16-dim group geometry, use every scale byte, and fit in D_C dims.
+const _: () = assert!(MIXED_HI_DIMS + MIXED_LO_DIMS / 2 == LATENT_BYTES);
+const _: () = assert!(MIXED_LO_DIMS == MIXED_LO_GROUPS * GROUP_DIM);
+const _: () = assert!(1 + MIXED_LO_GROUPS == N_GROUPS);
+const _: () = assert!(MIXED_DIMS <= D_C);
 
 /// NF4 codebook: 16 levels at the quantiles of `N(0, 1)`, normalised to
 /// `[-1, 1]` (denser near 0, where most latent mass lies). Ascending order.
@@ -50,7 +80,7 @@ pub const NF4_CODEBOOK: [f32; 16] = [
     0.3108, 0.4165, 0.5421, 0.7075, 1.0,
 ];
 
-/// Which 4-bit codec a tile's latent uses.
+/// Which codec a tile's latent uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LatentCodec {
     /// Uniform INT4, single per-tile scale.
@@ -59,6 +89,11 @@ pub enum LatentCodec {
     Int4Grouped,
     /// NF4 (normal-float) codebook, per-group scales.
     Nf4,
+    /// Mixed precision: top [`MIXED_HI_DIMS`] dims at 8-bit, next
+    /// [`MIXED_LO_DIMS`] at 4-bit, tail dropped. Built for steep real-key
+    /// spectra (outlier channels) that uniform INT4 cannot span. Assumes the
+    /// latent is ordered by decreasing variance (PCA order).
+    Mixed,
 }
 
 /// A single SLHA v2 context tile.
@@ -121,6 +156,12 @@ impl SciRustSlhaTile {
         self.flags & FLAG_NF4 != 0
     }
 
+    /// True if the latent uses the mixed-precision (8-bit head) layout.
+    #[inline]
+    pub fn is_mixed(&self) -> bool {
+        self.flags & FLAG_MIXED != 0
+    }
+
     /// Effective dequant scale for dimension `d`: global scale × the dim's
     /// per-group micro-scale.
     #[inline]
@@ -129,9 +170,13 @@ impl SciRustSlhaTile {
     }
 
     /// Dequantise one latent dimension `d` with its per-group scale, decoding
-    /// the nibble via uniform INT4 (signed zero-point) or the NF4 codebook.
+    /// the nibble via uniform INT4 (signed zero-point), the NF4 codebook, or
+    /// the mixed-precision layout.
     #[inline]
     pub fn dequant_at(&self, d: usize) -> f32 {
+        if self.is_mixed() {
+            return self.dequant_at_mixed(d);
+        }
         let byte = self.latent_kv[d >> 1];
         let nib = (if d & 1 == 0 { byte & 0x0F } else { byte >> 4 }) as usize;
         let level = if self.is_nf4() {
@@ -140,6 +185,26 @@ impl SciRustSlhaTile {
             (nib as i32 - 8) as f32
         };
         level * self.group_scale(d)
+    }
+
+    /// Mixed layout: dims `0..MIXED_HI_DIMS` are signed bytes (zero-point 128)
+    /// scaled by `group_scales[0]`; dims `MIXED_HI_DIMS..MIXED_DIMS` are
+    /// nibbles in `GROUP_DIM`-wide groups scaled by `group_scales[1..]`; the
+    /// dropped tail decodes to 0.
+    #[inline]
+    fn dequant_at_mixed(&self, d: usize) -> f32 {
+        if d < MIXED_HI_DIMS {
+            let level = self.latent_kv[d] as i32 - 128;
+            level as f32 * (self.scale * self.group_scales[0] as f32 / 255.0)
+        } else if d < MIXED_DIMS {
+            let ld = d - MIXED_HI_DIMS;
+            let byte = self.latent_kv[MIXED_HI_DIMS + (ld >> 1)];
+            let nib = (if ld & 1 == 0 { byte & 0x0F } else { byte >> 4 }) as i32;
+            let g = 1 + ld / GROUP_DIM;
+            (nib - 8) as f32 * (self.scale * self.group_scales[g] as f32 / 255.0)
+        } else {
+            0.0
+        }
     }
 
     /// Materialise the full dequantised latent vector (mostly for tests).
@@ -160,10 +225,11 @@ impl SciRustSlhaTile {
     /// scalar path. Both yield the same result up to float reassociation.
     #[inline]
     pub fn compute_score(&self, q_coarse: &[f32; D_C], q_sign: &[u64; RESIDUAL_WORDS]) -> f32 {
-        // The SIMD paths decode uniform INT4 only; NF4 tiles use the scalar path.
+        // The SIMD paths decode uniform INT4 only; NF4 and mixed-precision
+        // tiles use the scalar path (SIMD mixed decode is a follow-up).
         #[cfg(target_arch = "x86_64")]
         {
-            if !self.is_nf4() {
+            if !self.is_nf4() && !self.is_mixed() {
                 if std::is_x86_feature_detected!("avx512f") {
                     // SAFETY: guarded by runtime feature detection.
                     return unsafe { self.compute_score_avx512(q_coarse, q_sign) };
@@ -177,7 +243,7 @@ impl SciRustSlhaTile {
         #[cfg(target_arch = "aarch64")]
         {
             // NEON is baseline on aarch64 — no runtime detection needed.
-            if !self.is_nf4() {
+            if !self.is_nf4() && !self.is_mixed() {
                 // SAFETY: NEON is always available on this target.
                 return unsafe { self.compute_score_neon(q_coarse, q_sign) };
             }
@@ -538,6 +604,60 @@ pub fn quantize_latent_nf4(v: &[f32; D_C]) -> ([u8; LATENT_BYTES], f32, [u8; N_G
     (out, global, gs)
 }
 
+/// Mixed-precision quantisation (see [`FLAG_MIXED`]): the top
+/// [`MIXED_HI_DIMS`] dims as signed bytes (zero-point 128, step
+/// `max|·|/127`), the next [`MIXED_LO_DIMS`] as per-group signed INT4, the
+/// remaining tail **dropped** — the same 64-byte budget spent where the
+/// energy is. Assumes the latent is ordered by decreasing variance (PCA
+/// order). Scale bytes: `gs[0]` is the 8-bit block's step relative to
+/// `global`, `gs[1..]` the 4-bit groups' steps, exactly like the grouped
+/// codec. Returns `(bytes, global, gs)`.
+pub fn quantize_latent_mixed(v: &[f32; D_C]) -> ([u8; LATENT_BYTES], f32, [u8; N_GROUPS]) {
+    // Per-section quantisation steps.
+    let mut steps = [0.0f32; N_GROUPS];
+    let hi_max = v[..MIXED_HI_DIMS]
+        .iter()
+        .fold(0.0f32, |m, &x| m.max(x.abs()));
+    steps[0] = hi_max / 127.0;
+    for g in 0..MIXED_LO_GROUPS {
+        let base = MIXED_HI_DIMS + g * GROUP_DIM;
+        let mut mx = 0.0f32;
+        for d in base..base + GROUP_DIM {
+            mx = mx.max(v[d].abs());
+        }
+        steps[1 + g] = mx / 7.0;
+    }
+    let global = steps.iter().copied().fold(0.0f32, f32::max);
+    let global = if global > 0.0 { global } else { 1.0 };
+
+    let mut gs = [0u8; N_GROUPS];
+    for g in 0..N_GROUPS {
+        gs[g] = (steps[g] / global * 255.0).round().clamp(1.0, 255.0) as u8;
+    }
+
+    let mut out = [0u8; LATENT_BYTES];
+    // 8-bit head: one signed byte per dim, zero-point 128.
+    let eff_hi = global * (gs[0] as f32 / 255.0);
+    for d in 0..MIXED_HI_DIMS {
+        let q = (v[d] / eff_hi).round() as i32;
+        out[d] = (q.clamp(-128, 127) + 128) as u8;
+    }
+    // 4-bit body: nibbles after the head, grouped like the uniform codec.
+    for ld in 0..MIXED_LO_DIMS {
+        let d = MIXED_HI_DIMS + ld;
+        let eff = global * (gs[1 + ld / GROUP_DIM] as f32 / 255.0);
+        let nib = (((v[d] / eff).round() as i32).clamp(-8, 7) + 8) as u8 & 0x0F;
+        let byte = MIXED_HI_DIMS + (ld >> 1);
+        if ld & 1 == 0 {
+            out[byte] = (out[byte] & 0xF0) | nib;
+        } else {
+            out[byte] = (out[byte] & 0x0F) | (nib << 4);
+        }
+    }
+    // Tail dims MIXED_DIMS..D_C are dropped (decode to 0).
+    (out, global, gs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,6 +785,112 @@ mod tests {
             e_nf4 < e_uniform,
             "NF4 err {e_nf4} not < uniform {e_uniform}"
         );
+    }
+
+    /// A steep, GPT-2-like latent spectrum (the measured motivation for the
+    /// codec): per-dim std ~ 37·(d+1)^-0.9, i.e. λ0/λ63 ≈ 40× in std.
+    fn steep_latent(seed: u64) -> [f32; D_C] {
+        let mut rng = crate::rng::Rng::new(seed);
+        let mut v = [0.0f32; D_C];
+        for (d, x) in v.iter_mut().enumerate() {
+            let amp = 37.0 * ((d + 1) as f32).powf(-0.9);
+            *x = amp * rng.next_gaussian();
+        }
+        v
+    }
+
+    #[test]
+    fn mixed_dequant_roundtrips_and_drops_tail() {
+        let v = steep_latent(11);
+        let (packed, global, gs) = quantize_latent_mixed(&v);
+        let mut tile = tile_from(packed, global, gs);
+        tile.flags |= FLAG_MIXED;
+        let dq = tile.dequant_latent();
+        // 8-bit head: error within one 8-bit step.
+        let eff_hi = global * (gs[0] as f32 / 255.0);
+        for d in 0..MIXED_HI_DIMS {
+            assert!(
+                (dq[d] - v[d]).abs() <= eff_hi + 1e-6,
+                "hi dim {d}: |{} - {}| > step {eff_hi}",
+                dq[d],
+                v[d]
+            );
+        }
+        // 4-bit body: error within one step of its group.
+        for d in MIXED_HI_DIMS..MIXED_DIMS {
+            let g = 1 + (d - MIXED_HI_DIMS) / GROUP_DIM;
+            let eff = global * (gs[g] as f32 / 255.0);
+            assert!(
+                (dq[d] - v[d]).abs() <= eff + 1e-6,
+                "lo dim {d}: |{} - {}| > step {eff}",
+                dq[d],
+                v[d]
+            );
+        }
+        // Dropped tail decodes to exactly 0.
+        for d in MIXED_DIMS..D_C {
+            assert_eq!(dq[d], 0.0, "tail dim {d} must decode to 0");
+        }
+    }
+
+    #[test]
+    fn mixed_beats_uniform_int4_on_steep_spectrum() {
+        // On the steep spectrum the codec was built for, the 8-bit head must
+        // cut the reconstruction error decisively — including the price of the
+        // dropped tail (which carries ~no energy at this decay).
+        let sq_err = |t: &SciRustSlhaTile, v: &[f32; D_C]| -> f32 {
+            let dq = t.dequant_latent();
+            (0..D_C).map(|d| (dq[d] - v[d]).powi(2)).sum()
+        };
+        let (mut worse, mut total) = (0, 0);
+        for seed in 0..8u64 {
+            let v = steep_latent(100 + seed);
+            let (p1, s1, g1) = quantize_latent_grouped(&v);
+            let e_uniform = sq_err(&tile_from(p1, s1, g1), &v);
+            let (p2, s2, g2) = quantize_latent_mixed(&v);
+            let mut mixed = tile_from(p2, s2, g2);
+            mixed.flags |= FLAG_MIXED;
+            let e_mixed = sq_err(&mixed, &v);
+            total += 1;
+            if e_mixed >= e_uniform * 0.5 {
+                worse += 1;
+            }
+        }
+        assert_eq!(
+            worse, 0,
+            "mixed did not halve the uniform error on {worse}/{total} steep latents"
+        );
+    }
+
+    #[test]
+    fn mixed_tiles_route_to_the_scalar_path() {
+        // The SIMD kernels decode the uniform nibble layout only: a mixed tile
+        // fed to them would dequantise garbage. The dispatcher must therefore
+        // return exactly the scalar result for mixed tiles (HOT and WARM).
+        let v = steep_latent(21);
+        let (packed, global, gs) = quantize_latent_mixed(&v);
+        let mut rng = crate::rng::Rng::new(33);
+        let mut q = [0.0f32; D_C];
+        rng.fill_gaussian(&mut q);
+        let q_sign = [
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+        ];
+        for warm in [false, true] {
+            let mut tile = tile_from(packed, global, gs);
+            tile.dynamic_lambda = 0.37;
+            tile.residual_bitmap = [!0, 0, !0, 0];
+            tile.flags |= FLAG_MIXED | if warm { FLAG_WARM } else { 0 };
+            let via_dispatch = tile.compute_score(&q, &q_sign);
+            let via_scalar = tile.compute_score_scalar(&q, &q_sign);
+            assert_eq!(
+                via_dispatch.to_bits(),
+                via_scalar.to_bits(),
+                "dispatcher did not use the scalar path for a mixed tile (warm={warm})"
+            );
+        }
     }
 
     #[test]
