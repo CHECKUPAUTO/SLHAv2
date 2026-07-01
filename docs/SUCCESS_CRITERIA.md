@@ -68,6 +68,13 @@ cargo run --release --example offline_validation -- --dump /tmp/test --weights p
 > La séparation train/test est le point : un même corpus des deux côtés
 > re-mesure l'optimisme que `--weights` sert précisément à éliminer.
 
+> **Avant d'installer torch**, valide la tuyauterie (format `.bin`, lecture Rust,
+> chaîne train → held-out) sans modèle — `--synthetic` écrit des dumps valides en
+> stdlib pur :
+> `python scripts/dump_activations.py --synthetic --out /tmp/train --seed 1`
+> (puis `--seed 2` pour le test). Ces chiffres ne sont qu'un **test de tuyauterie**,
+> pas un GO/NO-GO — celui-ci exige les activations réelles.
+
 Si ce GO/NO-GO offline est **GO** → on engage la Phase 2 (perplexité réelle
 llama.cpp) contre les cibles F/M/D ci-dessus. S'il est **NO-GO** → on ajuste
 l'algo **ici** (RHT, résidu multi-bit, `d_c/d_s`, λ — chaque axe a déjà son

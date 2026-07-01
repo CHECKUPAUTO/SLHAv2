@@ -17,12 +17,17 @@ dim > 128 into a 128-dim latent + residual. Per-head keys (64/128 dims) are too
 narrow for the residual to mean anything; the honest first experiment compresses
 the full key projection. Multi-head structure is a Phase-1 follow-up.
 
-Requirements (on your machine — NOT needed to read this file):
+Requirements for the real dump (on your machine — NOT needed to read this file):
     pip install torch transformers
 
-Usage:
+Usage (real activations):
     python scripts/dump_activations.py --model gpt2 --layer 0 --out /tmp/act \\
         --text "Some representative text..."      # or --file corpus.txt
+
+Usage (torch-free plumbing check — validates the dump→harness contract with NO
+model, numpy or torch; use different --seed values for disjoint train/test sets):
+    python scripts/dump_activations.py --synthetic --out /tmp/train --seed 1
+    python scripts/dump_activations.py --synthetic --out /tmp/test  --seed 2
 """
 import argparse
 import struct
@@ -32,15 +37,63 @@ MAGIC = 0x534C4841  # "SLHA"
 
 
 def write_bin(path, mat):
-    """mat: 2-D float array [rows, cols]."""
-    import numpy as np
+    """Write a 2-D float matrix in the harness format. `mat` may be a numpy
+    ndarray (real dump) or a plain list-of-lists (synthetic, no numpy):
 
-    mat = np.ascontiguousarray(np.asarray(mat, dtype="<f4"))
-    rows, cols = mat.shape
+        [u32 magic][u32 rows][u32 cols][f32 rows*cols row-major, LE]
+    """
+    rows = len(mat)
+    cols = len(mat[0]) if rows else 0
     with open(path, "wb") as f:
         f.write(struct.pack("<III", MAGIC, rows, cols))
-        f.write(mat.tobytes())
+        try:
+            import numpy as np
+
+            f.write(np.ascontiguousarray(np.asarray(mat, dtype="<f4")).tobytes())
+        except ImportError:
+            packer = struct.Struct(f"<{cols}f")
+            for row in mat:
+                f.write(packer.pack(*row))
     print(f"  wrote {path}  ({rows} tokens × {cols} dims)")
+
+
+def synthetic_qkv(rows, dim, seed, rank=24, noise=0.1, n_outliers=4):
+    """Torch-free q/k/v with a low-rank base (so keys/queries correlate) plus
+    per-dim noise and a few heavy-tailed outlier dims — enough structure to
+    exercise the low-rank latent + residual pipeline. NOT a source of real
+    numbers: this validates the dump→harness plumbing, not model quality.
+
+    The subspace and outlier channels come from a FIXED structural seed (they
+    model one model's key geometry), so different `seed` values give disjoint
+    *corpora* over the SAME subspace — the honest analog of dumping train vs
+    test text from one model, where a held-out projection should generalise.
+    Returns three [rows][dim] lists."""
+    import math
+    import random
+
+    struct_rng = random.Random(0xB0A5E)  # fixed: shared subspace across corpora
+    basis = [[struct_rng.gauss(0.0, 1.0) for _ in range(dim)] for _ in range(rank)]
+    outlier_dims = [struct_rng.randrange(dim) for _ in range(n_outliers)]
+    inv_sqrt_r = 1.0 / math.sqrt(rank)
+
+    rng = random.Random(seed)  # corpus-specific: tokens + noise vary with seed
+
+    def make(n):
+        out = []
+        for _ in range(n):
+            code = [rng.gauss(0.0, 1.0) for _ in range(rank)]
+            row = [0.0] * dim
+            for c, brow in zip(code, basis):
+                for j in range(dim):
+                    row[j] += c * brow[j]
+            for j in range(dim):
+                row[j] = inv_sqrt_r * row[j] + noise * rng.gauss(0.0, 1.0)
+            for od in outlier_dims:
+                row[od] += rng.gauss(0.0, 3.0)
+            out.append(row)
+        return out
+
+    return make(rows), make(rows), make(rows)
 
 
 def main():
@@ -51,7 +104,33 @@ def main():
     ap.add_argument("--text", default=None, help="inline text to run through the model")
     ap.add_argument("--file", default=None, help="text file to run through the model")
     ap.add_argument("--max-tokens", type=int, default=1024, help="cap the sequence length")
+    ap.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="generate torch-free synthetic q/k/v (validate the plumbing, no model)",
+    )
+    ap.add_argument("--rows", type=int, default=256, help="synthetic: token count")
+    ap.add_argument("--dim", type=int, default=256, help="synthetic: model width (must be > 128)")
+    ap.add_argument("--seed", type=int, default=1, help="synthetic: RNG seed (vary for train vs test)")
     args = ap.parse_args()
+
+    import os
+
+    os.makedirs(args.out, exist_ok=True)
+
+    if args.synthetic:
+        if args.dim <= 128:
+            sys.exit(f"--dim must be > 128 (SLHA needs d > 128); got {args.dim}")
+        print(
+            f"SYNTHETIC dump (no model) — rows={args.rows} dim={args.dim} "
+            f"seed={args.seed} out={args.out}"
+        )
+        q, k, v = synthetic_qkv(args.rows, args.dim, args.seed)
+        for name, mat in (("q", q), ("k", k), ("v", v)):
+            write_bin(os.path.join(args.out, f"{name}.bin"), mat)
+        print(f"\n  key dim d = {args.dim}  (OK, > 128)")
+        print(f"  next:  cargo run --release --example offline_validation -- --dump {args.out}")
+        return
 
     try:
         import numpy as np  # noqa: F401
@@ -118,9 +197,6 @@ def main():
     if "k" not in captured:
         sys.exit("hook captured nothing — adjust for this architecture")
 
-    import os
-
-    os.makedirs(args.out, exist_ok=True)
     for name in ("q", "k", "v"):
         mat = captured[name].squeeze(0).detach().cpu().numpy()  # [seq, d_model]
         write_bin(os.path.join(args.out, f"{name}.bin"), mat)
