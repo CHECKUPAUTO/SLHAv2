@@ -58,11 +58,11 @@ réelles**. Sur une machine équipée de PyTorch/transformers :
 python scripts/dump_activations.py --model gpt2 --layer 0 --out /tmp/train --file train.txt
 python scripts/dump_activations.py --model gpt2 --layer 0 --out /tmp/test  --file test.txt
 
-# 2) Apprendre la projection sur le corpus d'entraînement, la sauver
-cargo run --release --example train_on_real_activations -- --dump /tmp/train --out proj.slhw
+# 2) Apprendre la projection JOINTE clés+requêtes sur le corpus d'entraînement
+cargo run --release --example train_on_real_activations -- --dump /tmp/train --joint --out proj.slhw
 
-# 3) GO/NO-GO offline sur le corpus de TEST, projection tenue à l'écart (chiffre honnête)
-cargo run --release --example offline_validation -- --dump /tmp/test --weights proj.slhw
+# 3) GO/NO-GO offline sur le corpus de TEST, projection tenue à l'écart, codec mixte
+cargo run --release --example offline_validation -- --dump /tmp/test --weights proj.slhw --codec mixed
 ```
 
 > La séparation train/test est le point : un même corpus des deux côtés
@@ -74,6 +74,16 @@ cargo run --release --example offline_validation -- --dump /tmp/test --weights p
 > `python scripts/dump_activations.py --synthetic --out /tmp/train --seed 1`
 > (puis `--seed 2` pour le test). Ces chiffres ne sont qu'un **test de tuyauterie**,
 > pas un GO/NO-GO — celui-ci exige les activations réelles.
+
+> **Résultat (juillet 2026)** — exécuté sur GPT-2 couche 6 (d=768, corpus
+> disjoints de 1024 tokens). Départ **NO-GO** : cos 0,834 / KL 0,81. Après
+> diagnostic et deux correctifs mergés (projection jointe `--joint`, codec
+> mixte `--codec mixed` — détail dans [`../FINDINGS.md`](../FINDINGS.md) §5) :
+> **cos 0,966 / KL 0,12**, soit 99,4 % du plafond flottant du sous-espace 128
+> (0,971, mesuré). Le seuil 0,98 n'est **pas atteignable sur ce proxy** — le
+> reste est la troncature de rang 768→128 elle-même. La décision Phase 2 se
+> prend sur le point de déploiement réel (rang effectif par couche/modèle),
+> pas sur ce seul chiffre pleine-largeur.
 
 Si ce GO/NO-GO offline est **GO** → on engage la Phase 2 (perplexité réelle
 llama.cpp) contre les cibles F/M/D ci-dessus. S'il est **NO-GO** → on ajuste
