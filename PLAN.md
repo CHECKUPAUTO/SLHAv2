@@ -64,6 +64,14 @@ But : estimer l'impact qualité **sans toucher à llama.cpp**, en quelques jours
 **Sortie : rapport chiffré.** Si NO-GO → on ajuste l'algo **ici**, pas après
 3 semaines d'intégration. C'est l'expérience à plus haut ROI du plan.
 
+> **Statut (juillet 2026) : exécutée sur GPT-2 couche 6 — et le plan a marché
+> exactement comme prévu.** NO-GO initial (cos 0,834), diagnostic offline en
+> heures (pas en semaines d'intégration), deux correctifs mergés — projection
+> jointe (`fit_joint`, §1.3) et codec latent mixte 8/4-bit
+> (`LatentCodec::Mixed`, invariant 128 o intact) — puis re-mesure held-out :
+> **cos 0,966 / KL 0,12**, à 99,4 % du plafond du sous-espace 128 (0,971).
+> Rapport complet : `FINDINGS.md` §5 ; critère : `docs/SUCCESS_CRITERIA.md` §3.
+
 ---
 
 ## Phase 1 — Projections apprises sur activations réelles (**prérequis** de la perplexité) · **P0**
