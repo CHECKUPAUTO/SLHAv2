@@ -14,6 +14,14 @@
 //! ```text
 //! cargo run --release --example offline_validation -- --dump path/to/dir
 //! ```
+//! Validate a **held-out** projection (trained elsewhere, e.g. by
+//! `train_on_real_activations`) instead of re-fitting on the scored keys:
+//! ```text
+//! cargo run --release --example offline_validation -- --weights proj.slhw
+//! ```
+//! Fitting the projection on the very keys you then score is optimistic — the
+//! basis has already seen the test set. `--weights` loads a projection fitted on
+//! a *different* key set, giving the honest, non-optimistic number.
 //!
 //! This is a PROXY, not a real perplexity: it isolates the attention layer with
 //! cached activations. It exists to give a cheap, quantified GO/NO-GO *before*
@@ -26,6 +34,7 @@ use scirust::attention::slha_v2::D_C;
 use scirust::learned::{gen_keys, LearnedModel};
 use scirust::metrics::{cosine, dot, rel_l2, softmax_into};
 use scirust::rng::Rng;
+use scirust::weights;
 
 // GO/NO-GO thresholds (tune per model / context; documented in PLAN.md §1).
 const GO_COSINE: f32 = 0.98; // attention-output cosine vs FP32
@@ -69,11 +78,25 @@ fn kl(scores_true: &[f32], scores_slha: &[f32], scale: f32) -> f32 {
     acc
 }
 
-/// Fit a learned projection on the regime's keys, then measure attention-output
-/// fidelity and weight-distribution KL over the queries. Returns
-/// `(cosine, rel_l2, kl, captured_energy)`.
-fn evaluate(r: &Regime, warm: bool, rht: bool) -> (f32, f32, f32, f32) {
-    let model = LearnedModel::fit_with(&r.keys, r.d, 0x0005_C0FF, false, rht);
+/// Measure attention-output fidelity and weight-distribution KL over the
+/// queries. With `preloaded = Some(m)` the held-out projection `m` is scored
+/// as-is (train/test separation); otherwise a projection is fitted on the
+/// regime's own keys (optimistic). Returns `(cosine, rel_l2, kl, captured)`;
+/// `captured` is NaN for a preloaded projection (energy is not persisted).
+fn evaluate(
+    r: &Regime,
+    preloaded: Option<&LearnedModel>,
+    warm: bool,
+    rht: bool,
+) -> (f32, f32, f32, f32) {
+    let fitted;
+    let model = match preloaded {
+        Some(m) => m,
+        None => {
+            fitted = LearnedModel::fit_with(&r.keys, r.d, 0x0005_C0FF, false, rht);
+            &fitted
+        }
+    };
     let scale = 1.0 / (r.d as f32).sqrt();
     let tiles: Vec<_> = r
         .keys
@@ -100,16 +123,31 @@ fn evaluate(r: &Regime, warm: bool, rht: bool) -> (f32, f32, f32, f32) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let dump = args
-        .iter()
-        .position(|a| a == "--dump")
-        .and_then(|i| args.get(i + 1))
-        .cloned();
+    let opt = |f: &str| {
+        args.iter()
+            .position(|a| a == f)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+    let dump = opt("--dump");
+
+    // Optional held-out projection: score it as-is instead of re-fitting.
+    let preloaded = opt("--weights")
+        .map(|path| weights::load(&path).unwrap_or_else(|e| panic!("--weights {path}: {e}")));
 
     let (source, regimes) = build_regimes(dump);
 
     println!("== Phase 0 — validation OFFLINE de SLHA v2 (projection APPRISE) ==\n");
-    println!("  Source : {source}\n");
+    println!("  Source : {source}");
+    if let Some(m) = preloaded.as_ref() {
+        println!(
+            "  Projection : held-out (--weights, d={}), NON réajustée sur les clés testées.",
+            m.d
+        );
+    } else {
+        println!("  Projection : réajustée sur les clés testées (optimiste ; cf. --weights).");
+    }
+    println!();
     println!(
         "  {:<12} {:<5} {:>4} | {:>8} {:>8} {:>9} {:>8} | verdict",
         "régime", "état", "RHT", "cos↑", "relL2↓", "KL(ppl)↓", "captée"
@@ -118,20 +156,38 @@ fn main() {
 
     let mut any_hot_go = false;
     for r in &regimes {
+        if let Some(m) = preloaded.as_ref() {
+            assert_eq!(
+                m.d, r.d,
+                "projection --weights entraînée pour d={} mais le régime « {} » a d={}",
+                m.d, r.label, r.d
+            );
+        }
+        // A held-out projection carries one baked-in RHT setting ("wts"); without
+        // one we sweep RHT off/on to compare the incoherence transform (axis A2).
+        let cases: Vec<(&str, Option<&LearnedModel>, bool)> = match preloaded.as_ref() {
+            Some(m) => vec![("wts", Some(m), false)],
+            None => vec![("off", None, false), ("on", None, true)],
+        };
         for &warm in &[false, true] {
-            for &rht in &[false, true] {
-                let (cos, rl2, klv, captured) = evaluate(r, warm, rht);
+            for &(rht_label, pm, rht) in &cases {
+                let (cos, rl2, klv, captured) = evaluate(r, pm, warm, rht);
                 let go = !warm && cos >= GO_COSINE && klv <= GO_KL;
                 any_hot_go |= go;
+                let captured_col = if captured.is_nan() {
+                    "—".to_string()
+                } else {
+                    format!("{:.1}%", captured * 100.0)
+                };
                 println!(
-                    "  {:<12} {:<5} {:>4} | {:>8.4} {:>8.4} {:>9.4} {:>7.1}% | {}",
+                    "  {:<12} {:<5} {:>4} | {:>8.4} {:>8.4} {:>9.4} {:>8} | {}",
                     r.label,
                     if warm { "WARM" } else { "HOT" },
-                    if rht { "on" } else { "off" },
+                    rht_label,
                     cos,
                     rl2,
                     klv,
-                    captured * 100.0,
+                    captured_col,
                     if warm {
                         "—"
                     } else if go {
@@ -157,7 +213,9 @@ fn main() {
         "\n  Honnêteté : (1) PROXY couche-isolée, pas une vraie perplexité ; (2) sans\n  \
          `--dump`, clés synthétiques réalistes — branche `scripts/dump_activations.py`\n  \
          sur un vrai modèle pour le chiffre réel ; (3) projection APPRISE (PCA),\n  \
-         contrairement aux études §7 (JL aléatoire)."
+         contrairement aux études §7 (JL aléatoire) ; (4) sans `--weights`, la\n  \
+         projection est réajustée sur les clés testées (optimiste) — passe une\n  \
+         projection tenue à l'écart pour le chiffre honnête."
     );
 }
 
