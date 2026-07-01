@@ -23,6 +23,11 @@
 //! basis has already seen the test set. `--weights` loads a projection fitted on
 //! a *different* key set, giving the honest, non-optimistic number.
 //!
+//! `--codec {grouped|nf4|mixed}` selects the latent quantiser (default:
+//! grouped INT4). `mixed` stores the top 8 latent dims at 8-bit and the next
+//! 112 at 4-bit in the same 64 bytes — built for the steep spectra of real
+//! keys, where uniform INT4's 16 levels cannot span the outlier direction.
+//!
 //! This is a PROXY, not a real perplexity: it isolates the attention layer with
 //! cached activations. It exists to give a cheap, quantified GO/NO-GO *before*
 //! the expensive llama.cpp integration (see PLAN.md, Phase 0).
@@ -30,7 +35,7 @@
 // Numeric loops read closer to the math with indexing.
 #![allow(clippy::needless_range_loop)]
 
-use scirust::attention::slha_v2::D_C;
+use scirust::attention::slha_v2::{LatentCodec, D_C};
 use scirust::learned::{gen_keys, LearnedModel};
 use scirust::metrics::{cosine, dot, rel_l2, softmax_into};
 use scirust::rng::Rng;
@@ -88,6 +93,7 @@ fn evaluate(
     preloaded: Option<&LearnedModel>,
     warm: bool,
     rht: bool,
+    codec: LatentCodec,
 ) -> (f32, f32, f32, f32) {
     let fitted;
     let model = match preloaded {
@@ -102,7 +108,7 @@ fn evaluate(
         .keys
         .iter()
         .enumerate()
-        .map(|(i, k)| model.encode(k, i as u32, warm))
+        .map(|(i, k)| model.encode_with(k, i as u32, warm, codec))
         .collect();
 
     let (mut cos, mut rl2, mut klsum) = (0.0f32, 0.0f32, 0.0f32);
@@ -131,6 +137,14 @@ fn main() {
     };
     let dump = opt("--dump");
 
+    // Latent codec for the tile encode (plan axis: INT4 vs NF4 vs mixed 8/4-bit).
+    let codec = match opt("--codec").as_deref() {
+        None | Some("grouped") => LatentCodec::Int4Grouped,
+        Some("nf4") => LatentCodec::Nf4,
+        Some("mixed") => LatentCodec::Mixed,
+        Some(other) => panic!("--codec {other}: expected grouped | nf4 | mixed"),
+    };
+
     // Optional held-out projection: score it as-is instead of re-fitting.
     let preloaded = opt("--weights")
         .map(|path| weights::load(&path).unwrap_or_else(|e| panic!("--weights {path}: {e}")));
@@ -147,6 +161,15 @@ fn main() {
     } else {
         println!("  Projection : réajustée sur les clés testées (optimiste ; cf. --weights).");
     }
+    println!(
+        "  Codec latent : {}",
+        match codec {
+            LatentCodec::Int4Grouped => "INT4 groupé (défaut)",
+            LatentCodec::Nf4 => "NF4",
+            LatentCodec::Mixed => "MIXTE 8/4-bit (tête 8 dims @8b)",
+            LatentCodec::Int4Single => "INT4 simple",
+        }
+    );
     println!();
     println!(
         "  {:<12} {:<5} {:>4} | {:>8} {:>8} {:>9} {:>8} | verdict",
@@ -171,7 +194,7 @@ fn main() {
         };
         for &warm in &[false, true] {
             for &(rht_label, pm, rht) in &cases {
-                let (cos, rl2, klv, captured) = evaluate(r, pm, warm, rht);
+                let (cos, rl2, klv, captured) = evaluate(r, pm, warm, rht, codec);
                 let go = !warm && cos >= GO_COSINE && klv <= GO_KL;
                 any_hot_go |= go;
                 let captured_col = if captured.is_nan() {
