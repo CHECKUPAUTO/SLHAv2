@@ -44,7 +44,8 @@ Sans seuil, on ne peut pas conclure. À fixer d'abord :
 - **Mémoire :** empreinte KV vs baseline (viser le facteur mesuré, pas projeté).
 - **Débit :** tokens/s de bout en bout à contexte long, vs baseline FP16.
 
-Livrable : `docs/SUCCESS_CRITERIA.md` (une page, chiffrée).
+Livrable : [`docs/SUCCESS_CRITERIA.md`](docs/SUCCESS_CRITERIA.md) — une page,
+chiffrée, **seuils pré-enregistrés** (fait ✅).
 
 ---
 
