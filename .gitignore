@@ -20,5 +20,9 @@ Thumbs.db
 *.svg
 *.html
 
+# Python artifacts (scripts/dump_activations.py)
+__pycache__/
+*.pyc
+
 # Rapport slha-audit genere (host-specific, ex. aarch64 NEON/cache)
 /audit.json
