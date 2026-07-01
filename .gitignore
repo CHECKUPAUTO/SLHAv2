@@ -24,5 +24,8 @@ Thumbs.db
 __pycache__/
 *.pyc
 
+# Trained projection weights (scirust::weights / train_on_real_activations)
+*.slhw
+
 # Rapport slha-audit genere (host-specific, ex. aarch64 NEON/cache)
 /audit.json
