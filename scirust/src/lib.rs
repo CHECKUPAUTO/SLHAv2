@@ -36,5 +36,6 @@ pub mod rng;
 pub mod rope;
 pub mod safety;
 pub mod scenario;
+pub mod weights;
 
 pub use attention::slha_v2::{SciRustSlhaTile, D_C, D_S, LATENT_BYTES, RESIDUAL_WORDS};
